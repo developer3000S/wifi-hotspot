@@ -44,6 +44,11 @@ init_mysql() {
     # Fix mysql user home directory (common Docker issue)
     mkdir -p /nonexistent 2>/dev/null || true
 
+    # Create MySQL log directory (required by MySQL 8.0)
+    mkdir -p /var/log/mysql
+    touch /var/log/mysql/error.log
+    chown -R mysql:mysql /var/log/mysql
+
     # Fix permissions on data directory
     chown -R mysql:mysql /var/lib/mysql 2>/dev/null || true
 
