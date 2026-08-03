@@ -23,7 +23,6 @@ RUN apt-get update && \
     ipset \
     procps \
     psmisc \
-    sysctl \
     dnsutils \
     telnet \
     less \
