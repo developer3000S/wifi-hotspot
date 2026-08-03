@@ -13,7 +13,6 @@ LABEL description="Docker container for WiFi Hotspot with Captive Portal (CoovaC
 # Install system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    # System tools
     wget \
     curl \
     git \
@@ -28,8 +27,6 @@ RUN apt-get update && \
     dnsutils \
     telnet \
     less \
-    
-    # Build dependencies
     build-essential \
     autoconf \
     automake \
@@ -44,8 +41,6 @@ RUN apt-get update && \
     devscripts \
     gengetopt \
     bash-completion \
-    
-    # Library dependencies
     libssl-dev \
     libcurl4-gnutls-dev \
     libjson-c-dev \
@@ -55,8 +50,6 @@ RUN apt-get update && \
     libxpm-dev \
     libpcrecpp0v5 \
     libgcrypt20-dev \
-    
-    # Web server and PHP
     nginx \
     php-fpm \
     php-mysql \
@@ -66,22 +59,14 @@ RUN apt-get update && \
     php-xml \
     php-zip \
     php-json \
-    
-    # Database
     mysql-server \
     mysql-client \
     default-mysql-client \
-    
-    # RADIUS
     freeradius \
     freeradius-mysql \
-    
-    # Network services
     dnsmasq \
-    hostapd \
-    
-    # Cleanup
-    && rm -rf /var/lib/apt/lists/*
+    hostapd && \
+    rm -rf /var/lib/apt/lists/*
 
 # Clone and build CoovaChilli
 RUN git clone --depth 1 https://github.com/coova/coova-chilli.git /tmp/coova-chilli && \
