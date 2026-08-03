@@ -31,19 +31,26 @@ echo ""
 
 # Step 3: Remove old volumes and networks
 echo "[3/4] Cleaning up old volumes and networks..."
-docker-compose down -v 2>/dev/null || true
+docker compose down -v 2>/dev/null || true
 echo "✓ Volumes and networks cleaned"
 echo ""
 
-# Step 4: Build and start the project
-echo "[4/4] Building and starting the project..."
-docker-compose up -d --build
+# Step 4: Configure host sysctls (required for network_mode: host)
+echo "[4/5] Configuring host network settings..."
+sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
+sysctl -w net.ipv4.conf.all.rp_filter=2 2>/dev/null || true
+echo "✓ Host network settings configured"
+echo ""
+
+# Step 5: Build and start the project
+echo "[5/5] Building and starting the project..."
+docker compose up -d --build
 echo ""
 echo "=== Setup Complete ==="
 echo "WiFi Hotspot is now running in Docker!"
 echo ""
 echo "To check status:"
-echo "  docker-compose ps"
+echo "  docker compose ps"
 echo ""
 echo "To view logs:"
-echo "  docker-compose logs -f"
+echo "  docker compose logs -f"

@@ -81,7 +81,7 @@ RUN mkdir -p /etc/chilli \
     /var/run/chilli \
     /var/log/chilli \
     /var/www/hotspot.example.com \
-    /etc/freeradius/3.0/mods-enabled/sql \
+    /etc/freeradius/3.0/mods-enabled \
     /etc/hostapd \
     /etc/dnsmasq.d
 

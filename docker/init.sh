@@ -40,53 +40,96 @@ wait_mysql() {
 # Function to initialize MySQL database
 init_mysql() {
     log "Initializing MySQL database..."
-    
+
+    # Fix mysql user home directory (common Docker issue)
+    mkdir -p /nonexistent 2>/dev/null || true
+
+    # Fix permissions on data directory
+    chown -R mysql:mysql /var/lib/mysql 2>/dev/null || true
+
+    # Initialize MySQL data directory if empty (first run with volume mount)
+    if [ ! -d /var/lib/mysql/mysql ]; then
+        log "Initializing MySQL data directory..."
+        mysqld --initialize-insecure --user=mysql --datadir=/var/lib/mysql 2>/dev/null || \
+        mysql_install_db --user=mysql --datadir=/var/lib/mysql 2>/dev/null || true
+        log "MySQL data directory initialized"
+    fi
+
     # Start MySQL
-    service mysql start
+    service mysql start || mysqld_safe --user=mysql &
     wait_mysql
-    
+
+    # Set root password if not set
+    mysql -u root --connect-expired-password -e \
+        "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD:-raspbian}';" 2>/dev/null || true
+
     # Create radius database if it doesn't exist
     mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e "CREATE DATABASE IF NOT EXISTS ${RADIUS_DB_NAME:-radius};" || true
-    
+
     # Create radius user if it doesn't exist
     mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e \
         "CREATE USER IF NOT EXISTS '${RADIUS_DB_USER:-appdemoradius}'@'%' IDENTIFIED BY '${RADIUS_DB_PASSWORD:-raspbian}';" || true
-    
+
     # Grant privileges
     mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e \
         "GRANT ALL PRIVILEGES ON ${RADIUS_DB_NAME:-radius}.* TO '${RADIUS_DB_USER:-appdemoradius}'@'%';" || true
-    
+
     # Flush privileges
     mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e "FLUSH PRIVILEGES;" || true
-    
+
     # Import FreeRADIUS schema
-    if [ ! -f /var/lib/mysql/radius/radcheck.frm ]; then
+    if [ ! -f /var/lib/mysql/radius/radcheck.frm ] && [ ! -f /var/lib/mysql/radius/radcheck.ibd ]; then
         log "Importing FreeRADIUS schema..."
-        mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" ${RADIUS_DB_NAME:-radius} < /etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql || true
+        mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" ${RADIUS_DB_NAME:-radius} \
+            < /etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql 2>/dev/null || true
     fi
-    
+
     # Create test user if it doesn't exist
     mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" ${RADIUS_DB_NAME:-radius} -e \
-        "INSERT INTO radcheck (username, attribute, op, value) VALUES ('usertest', 'Cleartext-Password', ':=', 'passwd') ON DUPLICATE KEY UPDATE username='usertest';" || true
-    
+        "INSERT INTO radcheck (username, attribute, op, value) VALUES ('usertest', 'Cleartext-Password', ':=', 'passwd') ON DUPLICATE KEY UPDATE username='usertest';" 2>/dev/null || true
+
     log "MySQL initialization completed"
 }
 
 # Function to configure FreeRADIUS
 configure_freeradius() {
     log "Configuring FreeRADIUS..."
-    
-    # Configure clients.conf
+
+    # Create necessary directories (may be missing due to empty volume mount)
+    mkdir -p /etc/freeradius/3.0/mods-enabled/
+    mkdir -p /etc/freeradius/3.0/mods-available/
+    mkdir -p /etc/freeradius/3.0/sites-available/
+    mkdir -p /etc/freeradius/3.0/mods-config/sql/main/mysql/
+
+    # Configure clients.conf - create minimal version if doesn't exist
     if [ ! -f /etc/freeradius/3.0/clients.conf ]; then
-        cp /etc/freeradius/3.0/clients.conf.bak /etc/freeradius/3.0/clients.conf 2>/dev/null || \
-        cp /etc/freeradius/clients.conf /etc/freeradius/3.0/clients.conf 2>/dev/null || true
+        cat > /etc/freeradius/3.0/clients.conf <<EOF
+client localhost {
+    ipaddr = 127.0.0.1
+    secret = ${HS_RADSECRET:-radtesting123}
+    require_message_authenticator = no
+    nas_type = other
+}
+
+client localnet {
+    ipaddr = 10.10.10.0/24
+    secret = ${HS_RADSECRET:-radtesting123}
+    require_message_authenticator = no
+    nas_type = other
+}
+EOF
+    else
+        # Update client secret
+        sed -i "s/secret = testing123/secret = ${HS_RADSECRET:-radtesting123}/g" /etc/freeradius/3.0/clients.conf || true
     fi
-    
-    # Update client secret
-    sed -i "s/secret = testing123/secret = ${HS_RADSECRET:-radtesting123}/g" /etc/freeradius/3.0/clients.conf || true
-    
+
+    # Remove directory at mods-enabled/sql if it was incorrectly created
+    if [ -d /etc/freeradius/3.0/mods-enabled/sql ] && [ ! -L /etc/freeradius/3.0/mods-enabled/sql ]; then
+        rm -rf /etc/freeradius/3.0/mods-enabled/sql
+    fi
+
     # Configure SQL module
-    cat > /etc/freeradius/3.0/mods-enabled/sql << EOF
+    cat > /etc/freeradius/3.0/mods-enabled/sql <<EOF
 sql {
     driver = "rlm_sql_mysql"
     dialect = "mysql"
@@ -99,22 +142,19 @@ sql {
     sqrt = yes
 }
 EOF
-    
-    # Configure default site
-    sed -i "s/#-sql/-sql/g" /etc/freeradius/3.0/sites-available/default || true
-    
+
+    # Configure default site if it exists
+    sed -i "s/#-sql/-sql/g" /etc/freeradius/3.0/sites-available/default 2>/dev/null || true
+
     log "FreeRADIUS configuration completed"
 }
 
 # Function to configure CoovaChilli
 configure_chilli() {
     log "Configuring CoovaChilli..."
-    
-    # Create config from defaults if it doesn't exist
-    if [ ! -f /etc/chilli/config ]; then
-        cp /etc/chilli/defaults /etc/chilli/config
-    fi
-    
+    # Ensure config directory exists
+    mkdir -p /etc/chilli
+
     # Update configuration
     cat > /etc/chilli/config << EOF
 # Local Network Configurations
@@ -215,12 +255,58 @@ EOF
 # Function to configure Nginx
 configure_nginx() {
     log "Configuring Nginx..."
-    
+
+    # Create necessary directories (may be missing due to empty volume mount)
+    mkdir -p /etc/nginx/sites-available
+    mkdir -p /etc/nginx/sites-enabled
+    mkdir -p /etc/nginx/conf.d
+    mkdir -p /var/log/nginx
+    mkdir -p /run/php
+
+    # Create minimal nginx.conf if missing
+    if [ ! -f /etc/nginx/nginx.conf ]; then
+        cat > /etc/nginx/nginx.conf <<'NGINXEOF'
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 768;
+}
+
+http {
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    access_log /var/log/nginx/access.log;
+    error_log /var/log/nginx/error.log;
+
+    gzip on;
+
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
+}
+NGINXEOF
+    fi
+
+    # Create mime.types if missing
+    if [ ! -f /etc/nginx/mime.types ]; then
+        cp /usr/share/nginx/modules-available/../../../etc/nginx/mime.types /etc/nginx/mime.types 2>/dev/null || \
+        echo "types { text/html html; text/css css; application/javascript js; image/png png; image/jpeg jpg; }" > /etc/nginx/mime.types
+    fi
+
     # Remove default site
     rm -f /etc/nginx/sites-enabled/default
-    
+
     # Create hotspot site configuration
-    cat > /etc/nginx/sites-available/hotspot.example.com << EOF
+    cat > /etc/nginx/sites-available/hotspot.example.com <<EOF
 server {
     listen ${HS_UAMLISTEN:-10.10.10.1}:80 default_server;
     server_name hotspot.example.com;
