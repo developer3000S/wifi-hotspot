@@ -1,0 +1,32 @@
+# Docker
+.docker/
+docker/data/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Build artifacts
+docker/*.deb
+*.zip
+*.tar.gz
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Local configuration overrides
+docker/config/*.local

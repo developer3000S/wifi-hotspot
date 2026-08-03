@@ -1,0 +1,58 @@
+# Docker Compose Override for Development
+# This file extends docker-compose.yml with development-specific configurations
+
+version: '3.8'
+
+services:
+  wifi-hotspot:
+    # Build with cache for faster rebuilds
+    build:
+      cache_from:
+        - ubuntu:20.04
+      
+    # Development volumes for easier editing
+    volumes:
+      - ./docker/config:/etc/wifi-hotspot-config:ro
+      - ./docker/custom:/etc/custom-config:ro
+      - ./hotspot-login:/var/www/hotspot.example.com/hotspot-login
+      
+    # Environment variables for development
+    environment:
+      - DEBUG=1
+      - LOG_LEVEL=debug
+    
+    # Development ports (if not using host network mode)
+    ports:
+      - "8080:80"
+      - "8443:443"
+      - "3990:3990"
+      - "4990:4990"
+      - "1812:1812"
+      - "1813:1813"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "chilli"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Development database container (optional, for easier MySQL management)
+  mysql-dev:
+    image: mysql:5.7
+    container_name: mysql-dev
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: raspbian
+      MYSQL_DATABASE: radius
+      MYSQL_USER: appdemoradius
+      MYSQL_PASSWORD: raspbian
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./docker/data/mysql-dev:/var/lib/mysql
+    profiles:
+      - dev
+    networks:
+      - default

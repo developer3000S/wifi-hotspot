@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  wifi-hotspot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wifi-hotspot
+    hostname: wifi-hotspot
+    restart: unless-stopped
+    privileged: true  # Required for hostapd and network interface management
+    network_mode: host  # Required for direct network interface access
+    environment:
+      - TZ=UTC
+      - DEBIAN_FRONTEND=noninteractive
+      # Configuration variables
+      - HS_WANIF=eth0
+      - HS_LANIF=wlan0
+      - HS_NETWORK=10.10.10.0
+      - HS_NETMASK=255.255.255.0
+      - HS_UAMLISTEN=10.10.10.1
+      - HS_UAMPORT=3990
+      - HS_UAMUIPORT=4990
+      - HS_DNS1=10.10.10.1
+      - HS_DNS2=8.8.8.8
+      - HS_NASID=nas01
+      - HS_RADIUS=localhost
+      - HS_RADSECRET=radtesting123
+      - HS_UAMSECRET=uamtesting123
+      - HS_TCP_PORTS="80 443"
+      - MYSQL_ROOT_PASSWORD=raspbian
+      - RADIUS_DB_USER=appdemoradius
+      - RADIUS_DB_PASSWORD=raspbian
+      - RADIUS_DB_NAME=radius
+      - HOTSPOT_SSID=MME Captive Portal
+    volumes:
+      - ./docker/config:/etc/wifi-hotspot-config:ro
+      - ./docker/data/mysql:/var/lib/mysql
+      - ./docker/data/logs:/var/log
+      - ./docker/data/chilli:/var/lib/chilli
+      - ./docker/data/hostapd:/etc/hostapd
+      - ./docker/data/freeradius:/etc/freeradius
+      - ./docker/data/nginx:/etc/nginx
+      - ./docker/data/dnsmasq:/etc/dnsmasq.d
+      - ./hotspot-login:/var/www/hotspot.example.com/hotspot-login
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+      - SYS_MODULE
+    devices:
+      - "/dev/net/tun:/dev/net/tun"
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.rp_filter=2
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # Optional: daloRadius management interface (separate container)
+  daloradius:
+    image: nginx:alpine
+    container_name: daloradius
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ./docker/data/daloradius:/var/www/html
+      - ./docker/config/nginx-daloradius.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - wifi-hotspot
+    profiles:
+      - management
