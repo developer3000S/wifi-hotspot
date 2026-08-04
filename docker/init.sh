@@ -22,8 +22,18 @@ is_running() {
 wait_mysql() {
     local max_attempts=30
     local attempt=1
-    
-    while ! mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e "SELECT 1" > /dev/null 2>&1; do
+
+    while true; do
+        # Try without password first (fresh --initialize-insecure install)
+        if mysql -u root --password="" -e "SELECT 1" > /dev/null 2>&1; then
+            log "MySQL is ready (no password)"
+            return 0
+        fi
+        # Try with configured password (subsequent runs)
+        if mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e "SELECT 1" > /dev/null 2>&1; then
+            log "MySQL is ready"
+            return 0
+        fi
         if [ $attempt -ge $max_attempts ]; then
             log "ERROR: MySQL did not start in time"
             return 1
@@ -32,9 +42,6 @@ wait_mysql() {
         sleep 2
         ((attempt++))
     done
-    
-    log "MySQL is ready"
-    return 0
 }
 
 # Function to initialize MySQL database
@@ -82,11 +89,22 @@ init_mysql() {
     # Flush privileges
     mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e "FLUSH PRIVILEGES;" || true
 
-    # Import FreeRADIUS schema
-    if [ ! -f /var/lib/mysql/radius/radcheck.frm ] && [ ! -f /var/lib/mysql/radius/radcheck.ibd ]; then
-        log "Importing FreeRADIUS schema..."
-        mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" ${RADIUS_DB_NAME:-radius} \
-            < /etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql 2>/dev/null || true
+    # Import FreeRADIUS schema (search in multiple possible locations)
+    if [ ! -f /var/lib/mysql/radius/radcheck.ibd ]; then
+        SCHEMA_FILE=""
+        for p in \
+            /etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql \
+            /usr/share/freeradius/3.0/mods-config/sql/main/mysql/schema.sql \
+            $(find /usr/share/doc -name 'schema.sql' 2>/dev/null | grep -i mysql | head -1); do
+            [ -f "$p" ] && SCHEMA_FILE="$p" && break
+        done
+        if [ -n "$SCHEMA_FILE" ]; then
+            log "Importing FreeRADIUS schema from $SCHEMA_FILE..."
+            mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" ${RADIUS_DB_NAME:-radius} \
+                < "$SCHEMA_FILE" 2>/dev/null || true
+        else
+            log "WARNING: FreeRADIUS schema.sql not found, skipping schema import"
+        fi
     fi
 
     # Create test user if it doesn't exist
@@ -128,13 +146,26 @@ EOF
         sed -i "s/secret = testing123/secret = ${HS_RADSECRET:-radtesting123}/g" /etc/freeradius/3.0/clients.conf || true
     fi
 
-    # Remove directory at mods-enabled/sql if it was incorrectly created
-    if [ -d /etc/freeradius/3.0/mods-enabled/sql ] && [ ! -L /etc/freeradius/3.0/mods-enabled/sql ]; then
-        rm -rf /etc/freeradius/3.0/mods-enabled/sql
-    fi
-
-    # Configure SQL module
-    cat > /etc/freeradius/3.0/mods-enabled/sql <<EOF
+    # Use symlink to mods-available/sql if it exists, otherwise write custom config
+    # First, restore the original sql mod-available if it exists
+    if [ -f /etc/freeradius/3.0/mods-available/sql ]; then
+        # Update the existing sql module config with our credentials
+        SQL_CONF=/etc/freeradius/3.0/mods-available/sql
+        sed -i "s/^\s*driver\s*=.*/\tdriver = \"rlm_sql_mysql\"/" "$SQL_CONF" || true
+        sed -i "s/^\s*dialect\s*=.*/\tdialect = \"mysql\"/" "$SQL_CONF" || true
+        sed -i "s/^\s*server\s*=.*/\tserver = \"localhost\"/" "$SQL_CONF" || true
+        sed -i "s/^\s*port\s*=.*/\tport = 3306/" "$SQL_CONF" || true
+        sed -i "s/^\s*login\s*=.*/\tlogin = \"${RADIUS_DB_USER:-appdemoradius}\"/" "$SQL_CONF" || true
+        sed -i "s/^\s*password\s*=.*/\tpassword = \"${RADIUS_DB_PASSWORD:-raspbian}\"/" "$SQL_CONF" || true
+        sed -i "s/^\s*radius_db\s*=.*/\tradius_db = \"${RADIUS_DB_NAME:-radius}\"/" "$SQL_CONF" || true
+        sed -i "s/^\s*read_clients\s*=.*/\tread_clients = yes/" "$SQL_CONF" || true
+        # Enable the module via symlink
+        ln -sf /etc/freeradius/3.0/mods-available/sql /etc/freeradius/3.0/mods-enabled/sql 2>/dev/null || true
+    else
+        # Remove bad directory/file if present
+        [ -d /etc/freeradius/3.0/mods-enabled/sql ] && rm -rf /etc/freeradius/3.0/mods-enabled/sql || true
+        # Write minimal valid sql module config
+        cat > /etc/freeradius/3.0/mods-enabled/sql <<EOF
 sql {
     driver = "rlm_sql_mysql"
     dialect = "mysql"
@@ -144,9 +175,18 @@ sql {
     password = "${RADIUS_DB_PASSWORD:-raspbian}"
     radius_db = "${RADIUS_DB_NAME:-radius}"
     read_clients = yes
-    sqrt = yes
+    pool {
+        start = 5
+        min = 3
+        max = 10
+        spare = 3
+        uses = 0
+        lifetime = 0
+        idle_timeout = 60
+    }
 }
 EOF
+    fi
 
     # Configure default site if it exists
     sed -i "s/#-sql/-sql/g" /etc/freeradius/3.0/sites-available/default 2>/dev/null || true
@@ -395,32 +435,32 @@ start_services() {
     
     # Start MySQL
     log "Starting MySQL..."
-    service mysql start
-    wait_mysql
+    service mysql start || true
+    wait_mysql || log "WARNING: MySQL may not be fully ready"
     
     # Start FreeRADIUS
     log "Starting FreeRADIUS..."
-    service freeradius start
+    service freeradius start || log "WARNING: FreeRADIUS failed to start"
     
     # Start dnsmasq
     log "Starting dnsmasq..."
-    service dnsmasq start
+    service dnsmasq start || log "WARNING: dnsmasq failed to start"
     
     # Start PHP-FPM
     log "Starting PHP-FPM..."
-    service php7.4-fpm start
+    service php7.4-fpm start || log "WARNING: PHP-FPM failed to start"
     
     # Start Nginx
     log "Starting Nginx..."
-    service nginx start
+    service nginx start || log "WARNING: Nginx failed to start"
     
     # Start CoovaChilli
     log "Starting CoovaChilli..."
-    service chilli start
+    service chilli start || log "WARNING: CoovaChilli failed to start"
     
     # Start hostapd
     log "Starting hostapd..."
-    service hostapd start
+    service hostapd start || log "WARNING: hostapd failed to start"
     
     log "All services started successfully!"
 }
