@@ -118,6 +118,9 @@ init_mysql() {
 configure_freeradius() {
     log "Configuring FreeRADIUS..."
 
+    # Give freerad user access to MySQL socket
+    usermod -aG mysql freerad 2>/dev/null || true
+
     # Create necessary directories (may be missing due to empty volume mount)
     mkdir -p /etc/freeradius/3.0/mods-enabled/
     mkdir -p /etc/freeradius/3.0/mods-available/
@@ -146,38 +149,31 @@ EOF
         sed -i "s/secret = testing123/secret = ${HS_RADSECRET:-radtesting123}/g" /etc/freeradius/3.0/clients.conf || true
     fi
 
-    # Use symlink to mods-available/sql if it exists, otherwise write custom config
-    # First, restore the original sql mod-available if it exists
-    if [ -f /etc/freeradius/3.0/mods-available/sql ]; then
-        # Update the existing sql module config with our credentials
-        SQL_CONF=/etc/freeradius/3.0/mods-available/sql
-        sed -i "s/^\s*driver\s*=.*/\tdriver = \"rlm_sql_mysql\"/" "$SQL_CONF" || true
-        sed -i "s/^\s*dialect\s*=.*/\tdialect = \"mysql\"/" "$SQL_CONF" || true
-        sed -i "s/^\s*server\s*=.*/\tserver = \"localhost\"/" "$SQL_CONF" || true
-        sed -i "s/^\s*port\s*=.*/\tport = 3306/" "$SQL_CONF" || true
-        sed -i "s/^\s*login\s*=.*/\tlogin = \"${RADIUS_DB_USER:-appdemoradius}\"/" "$SQL_CONF" || true
-        sed -i "s/^\s*password\s*=.*/\tpassword = \"${RADIUS_DB_PASSWORD:-raspbian}\"/" "$SQL_CONF" || true
-        sed -i "s/^\s*radius_db\s*=.*/\tradius_db = \"${RADIUS_DB_NAME:-radius}\"/" "$SQL_CONF" || true
-        sed -i "s/^\s*read_clients\s*=.*/\tread_clients = yes/" "$SQL_CONF" || true
-        # Enable the module via symlink
-        ln -sf /etc/freeradius/3.0/mods-available/sql /etc/freeradius/3.0/mods-enabled/sql 2>/dev/null || true
-    else
-        # Remove bad directory/file if present
-        [ -d /etc/freeradius/3.0/mods-enabled/sql ] && rm -rf /etc/freeradius/3.0/mods-enabled/sql || true
-        # Write minimal valid sql module config
-        cat > /etc/freeradius/3.0/mods-enabled/sql <<EOF
+    # Always write a fresh minimal sql config (the original mods-available/sql
+    # has all credentials commented out; sed-patching is unreliable on it)
+    # Break existing symlink if present
+    rm -f /etc/freeradius/3.0/mods-enabled/sql
+    cat > /etc/freeradius/3.0/mods-enabled/sql <<EOF
 sql {
     driver = "rlm_sql_mysql"
     dialect = "mysql"
-    server = "localhost"
+
+    # Use 127.0.0.1 (not localhost) to force TCP instead of Unix socket
+    server = "127.0.0.1"
     port = 3306
     login = "${RADIUS_DB_USER:-appdemoradius}"
     password = "${RADIUS_DB_PASSWORD:-raspbian}"
     radius_db = "${RADIUS_DB_NAME:-radius}"
+
     read_clients = yes
+
+    # FreeRADIUS schema + queries
+    logfile = /var/log/freeradius/sqltrace.sql
+    sql_user_name = "%{User-Name}"
+
     pool {
-        start = 5
-        min = 3
+        start = 2
+        min = 1
         max = 10
         spare = 3
         uses = 0
@@ -186,7 +182,6 @@ sql {
     }
 }
 EOF
-    fi
 
     # Configure default site if it exists
     sed -i "s/#-sql/-sql/g" /etc/freeradius/3.0/sites-available/default 2>/dev/null || true
@@ -199,6 +194,12 @@ configure_chilli() {
     log "Configuring CoovaChilli..."
     # Ensure config directory exists
     mkdir -p /etc/chilli
+
+    # Register CoovaChilli init.d script (installed by coova-chilli to /etc/chilli/init.d/)
+    if [ -f /etc/chilli/init.d/chilli ] && [ ! -f /etc/init.d/chilli ]; then
+        ln -sf /etc/chilli/init.d/chilli /etc/init.d/chilli
+        log "Registered CoovaChilli init.d service"
+    fi
 
     # Update configuration
     cat > /etc/chilli/config << EOF
@@ -241,6 +242,24 @@ HS_DHCP_END=10.10.10.200
 HS_DHCP_LEASE=86400
 EOF
     
+    # Write chilli options file in coova-chilli format
+    # Each line: option=value (WITHOUT leading --; chilli reads this as a config file)
+    cat > /etc/chilli/options << EOF
+net=${HS_NETWORK:-10.10.10.0}/24
+uamlisten=${HS_UAMLISTEN:-10.10.10.1}
+uamport=${HS_UAMPORT:-3990}
+uamuiport=${HS_UAMUIPORT:-4990}
+dns1=${HS_DNS1:-10.10.10.1}
+dns2=${HS_DNS2:-8.8.8.8}
+radiusserver1=${HS_RADIUS:-127.0.0.1}
+radiusserver2=${HS_RADIUS:-127.0.0.1}
+radiussecret=${HS_RADSECRET:-radtesting123}
+uamsecret=${HS_UAMSECRET:-uamtesting123}
+uamallowed=${HS_NETWORK:-10.10.10.0}/24
+dhcpif=${HS_WANIF:-eth0}
+radiusnasid=${HS_NASID:-nas01}
+EOF
+
     # Configure up.sh for NAT
     cat > /etc/chilli/up.sh << 'EOF'
 #!/bin/bash
@@ -250,9 +269,9 @@ iptables -I POSTROUTING -t nat -o $HS_WANIF -j MASQUERADE
 iptables -I FORWARD -i $HS_LANIF -j ACCEPT
 iptables -I FORWARD -o $HS_LANIF -j ACCEPT
 EOF
-    
+
     chmod +x /etc/chilli/up.sh
-    
+
     log "CoovaChilli configuration completed"
 }
 
@@ -301,12 +320,92 @@ EOF
 configure_nginx() {
     log "Configuring Nginx..."
 
-    # Create necessary directories (may be missing due to empty volume mount)
+    # Create necessary directories
     mkdir -p /etc/nginx/sites-available
     mkdir -p /etc/nginx/sites-enabled
     mkdir -p /etc/nginx/conf.d
     mkdir -p /var/log/nginx
     mkdir -p /run/php
+    mkdir -p /etc/nginx/snippets
+
+    # Generate self-signed TLS cert if snakeoil package didn't install it
+    if [ ! -f /etc/ssl/certs/snakeoil.pem ]; then
+        log "Generating self-signed TLS certificate..."
+        mkdir -p /etc/ssl/private
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout /etc/ssl/private/snakeoil.key \
+            -out /etc/ssl/certs/snakeoil.pem \
+            -subj "/C=US/ST=State/L=City/O=WiFiHotspot/CN=hotspot.example.com" \
+            2>/dev/null || true
+        log "Self-signed certificate generated"
+    fi
+
+    # Ensure fastcgi-php.conf snippet exists
+    if [ ! -f /etc/nginx/snippets/fastcgi-php.conf ]; then
+        cat > /etc/nginx/snippets/fastcgi-php.conf <<'EOF'
+# regex to split $uri to $fastcgi_script_name and $fastcgi_path
+fastcgi_split_path_info ^(.+\.php)(/.+)$;
+
+# Check that the PHP script exists before passing it
+try_files $fastcgi_script_name =404;
+
+# Bypass the fact that try_files resets $fastcgi_path_info
+set $path_info $fastcgi_path_info;
+fastcgi_param PATH_INFO $path_info;
+
+fastcgi_index index.php;
+include fastcgi.conf;
+EOF
+    fi
+
+    # Ensure fastcgi.conf exists
+    if [ ! -f /etc/nginx/fastcgi.conf ]; then
+        cat > /etc/nginx/fastcgi.conf <<'EOF'
+fastcgi_param  SCRIPT_FILENAME    $document_root$fastcgi_script_name;
+fastcgi_param  QUERY_STRING       $query_string;
+fastcgi_param  REQUEST_METHOD     $request_method;
+fastcgi_param  CONTENT_TYPE       $content_type;
+fastcgi_param  CONTENT_LENGTH     $content_length;
+fastcgi_param  SCRIPT_NAME        $fastcgi_script_name;
+fastcgi_param  REQUEST_URI        $request_uri;
+fastcgi_param  DOCUMENT_URI       $document_uri;
+fastcgi_param  DOCUMENT_ROOT      $document_root;
+fastcgi_param  SERVER_PROTOCOL    $server_protocol;
+fastcgi_param  REQUEST_SCHEME     $scheme;
+fastcgi_param  HTTPS              $https if_not_empty;
+fastcgi_param  GATEWAY_INTERFACE  CGI/1.1;
+fastcgi_param  SERVER_SOFTWARE    nginx/$nginx_version;
+fastcgi_param  REMOTE_ADDR        $remote_addr;
+fastcgi_param  REMOTE_PORT        $remote_port;
+fastcgi_param  SERVER_ADDR        $server_addr;
+fastcgi_param  SERVER_PORT        $server_port;
+fastcgi_param  SERVER_NAME        $server_name;
+EOF
+    fi
+
+    # Ensure fastcgi_params exists
+    if [ ! -f /etc/nginx/fastcgi_params ]; then
+        cat > /etc/nginx/fastcgi_params <<'EOF'
+fastcgi_param  QUERY_STRING       $query_string;
+fastcgi_param  REQUEST_METHOD     $request_method;
+fastcgi_param  CONTENT_TYPE       $content_type;
+fastcgi_param  CONTENT_LENGTH     $content_length;
+fastcgi_param  SCRIPT_NAME        $fastcgi_script_name;
+fastcgi_param  REQUEST_URI        $request_uri;
+fastcgi_param  DOCUMENT_URI       $document_uri;
+fastcgi_param  DOCUMENT_ROOT      $document_root;
+fastcgi_param  SERVER_PROTOCOL    $server_protocol;
+fastcgi_param  REQUEST_SCHEME     $scheme;
+fastcgi_param  HTTPS              $https if_not_empty;
+fastcgi_param  GATEWAY_INTERFACE  CGI/1.1;
+fastcgi_param  SERVER_SOFTWARE    nginx/$nginx_version;
+fastcgi_param  REMOTE_ADDR        $remote_addr;
+fastcgi_param  REMOTE_PORT        $remote_port;
+fastcgi_param  SERVER_ADDR        $server_addr;
+fastcgi_param  SERVER_PORT        $server_port;
+fastcgi_param  SERVER_NAME        $server_name;
+EOF
+    fi
 
     # Create minimal nginx.conf if missing
     if [ ! -f /etc/nginx/nginx.conf ]; then
@@ -351,16 +450,17 @@ NGINXEOF
     rm -f /etc/nginx/sites-enabled/default
 
     # Create hotspot site configuration
+    # Listen on 0.0.0.0 so nginx starts even before the hotspot interface (10.10.10.1) is up
     cat > /etc/nginx/sites-available/hotspot.example.com <<EOF
 server {
-    listen ${HS_UAMLISTEN:-10.10.10.1}:80 default_server;
-    server_name hotspot.example.com;
+    listen 80 default_server;
+    server_name hotspot.example.com ${HS_UAMLISTEN:-10.10.10.1};
     return 301 https://\$server_name\$request_uri;
 }
 
 server {
-    listen ${HS_UAMLISTEN:-10.10.10.1}:443 ssl default_server;
-    server_name hotspot.example.com;
+    listen 443 ssl default_server;
+    server_name hotspot.example.com ${HS_UAMLISTEN:-10.10.10.1};
     
     ssl_certificate /etc/ssl/certs/snakeoil.pem;
     ssl_certificate_key /etc/ssl/private/snakeoil.key;
@@ -374,9 +474,8 @@ server {
     
     location ~ \.php\$ {
         include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/run/php/php7.4-fpm.sock;
+        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
     }
 }
 EOF
@@ -385,11 +484,11 @@ EOF
     ln -sf /etc/nginx/sites-available/hotspot.example.com /etc/nginx/sites-enabled/
     
     # Create PHP-FPM pool configuration
-    cat > /etc/php/7.4/fpm/pool.d/www.conf << EOF
+    cat > /etc/php/8.1/fpm/pool.d/www.conf << EOF
 [www]
 user = www-data
 group = www-data
-listen = /run/php/php7.4-fpm.sock
+listen = /run/php/php8.1-fpm.sock
 listen.owner = www-data
 listen.group = www-data
 pm = dynamic
@@ -440,7 +539,12 @@ start_services() {
     
     # Start FreeRADIUS
     log "Starting FreeRADIUS..."
-    service freeradius start || log "WARNING: FreeRADIUS failed to start"
+    if ! service freeradius start; then
+        log "WARNING: FreeRADIUS failed to start. Running config test:"
+        freeradius -XC 2>&1 | tail -30 || true
+        log "FreeRADIUS last error log:"
+        tail -20 /var/log/freeradius/freeradius.log 2>/dev/null || true
+    fi
     
     # Start dnsmasq
     log "Starting dnsmasq..."
@@ -448,15 +552,39 @@ start_services() {
     
     # Start PHP-FPM
     log "Starting PHP-FPM..."
-    service php7.4-fpm start || log "WARNING: PHP-FPM failed to start"
+    # Detect installed PHP-FPM version dynamically
+    PHP_FPM_SVC=$(ls /etc/init.d/php*-fpm 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "php7.4-fpm")
+    if ! service "$PHP_FPM_SVC" start; then
+        log "WARNING: PHP-FPM ($PHP_FPM_SVC) failed to start"
+    fi
     
     # Start Nginx
     log "Starting Nginx..."
-    service nginx start || log "WARNING: Nginx failed to start"
+    if ! service nginx start; then
+        log "WARNING: Nginx failed to start. Running config test:"
+        nginx -t 2>&1 || true
+        log "Nginx last error log:"
+        tail -20 /var/log/nginx/error.log 2>/dev/null || true
+    fi
     
     # Start CoovaChilli
     log "Starting CoovaChilli..."
-    service chilli start || log "WARNING: CoovaChilli failed to start"
+    if ! service chilli start 2>/dev/null; then
+        # Fallback: try running chilli directly using the options file
+        if command -v chilli >/dev/null 2>&1; then
+            log "Trying direct chilli start as fallback..."
+            chilli --conf /etc/chilli/options --fg &
+            sleep 2
+            if pgrep -x chilli >/dev/null 2>&1; then
+                log "CoovaChilli started via direct invocation"
+            else
+                log "WARNING: CoovaChilli failed to start (direct)"
+                chilli --conf /etc/chilli/options --fg 2>&1 | head -20 || true
+            fi
+        else
+            log "WARNING: CoovaChilli binary not found"
+        fi
+    fi
     
     # Start hostapd
     log "Starting hostapd..."

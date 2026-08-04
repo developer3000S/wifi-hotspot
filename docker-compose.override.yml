@@ -1,7 +1,6 @@
 # Docker Compose Override for Development
 # This file extends docker-compose.yml with development-specific configurations
 
-version: '3.8'
 
 services:
   wifi-hotspot:
@@ -21,14 +20,15 @@ services:
       - DEBUG=1
       - LOG_LEVEL=debug
     
-    # Development ports (if not using host network mode)
-    ports:
-      - "8080:80"
-      - "8443:443"
-      - "3990:3990"
-      - "4990:4990"
-      - "1812:1812"
-      - "1813:1813"
+    # NOTE: ports are not used in host network mode (network_mode: host is set in docker-compose.yml)
+    # Uncomment and switch to bridge mode if port mapping is needed:
+    # ports:
+    #   - "8080:80"
+    #   - "8443:443"
+    #   - "3990:3990"
+    #   - "4990:4990"
+    #   - "1812:1812"
+    #   - "1813:1813"
     
     # Health check
     healthcheck:

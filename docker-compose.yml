@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   wifi-hotspot:
@@ -39,8 +38,10 @@ services:
       - ./docker/data/logs:/var/log
       - ./docker/data/chilli:/var/lib/chilli
       - ./docker/data/hostapd:/etc/hostapd
-      - ./docker/data/freeradius:/etc/freeradius
-      - ./docker/data/nginx:/etc/nginx
+      # NOTE: freeradius and nginx volumes are intentionally NOT mounted here.
+      # Mounting empty host directories would shadow the full config trees
+      # installed inside the image, causing both services to fail on startup.
+      # init.sh configures them in-place at container start.
       - ./docker/data/dnsmasq:/etc/dnsmasq.d
       - ./hotspot-login:/var/www/hotspot.example.com/hotspot-login
     cap_add:

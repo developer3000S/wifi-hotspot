@@ -1,6 +1,7 @@
 # Dockerfile for WiFi Hotspot with Captive Portal
-# Based on Ubuntu 20.04 LTS
-FROM ubuntu:20.04
+# Based on Ubuntu 22.04 LTS (Jammy)
+# FreeRADIUS 3.2.x built from source (NetworkRADIUS repo is amd64-only; host is arm64)
+FROM ubuntu:22.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -8,9 +9,13 @@ ENV TZ=UTC
 
 # Metadata
 LABEL maintainer="wifi-hotspot-project"
-LABEL description="Docker container for WiFi Hotspot with Captive Portal (CoovaChilli, FreeRADIUS, hostapd, Nginx, dnsmasq)"
+LABEL description="Docker container for WiFi Hotspot with Captive Portal (CoovaChilli, FreeRADIUS 3.2.x, hostapd, Nginx, dnsmasq)"
 
 # Install system dependencies
+# Note: libpcrecpp0v5 not available in 22.04 (included in libpcre3-dev)
+#       PHP 8.1 is default on Ubuntu 22.04
+#       freeradius/freeradius-mysql from Ubuntu repos: sets up user, group, init.d, log dirs, config structure
+#       We will then overlay with FreeRADIUS 3.2.x built from source to remove MYSQL_OPT_RECONNECT
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     wget \
@@ -47,25 +52,50 @@ RUN apt-get update && \
     libpcre3-dev \
     libgd-dev \
     libxpm-dev \
-    libpcrecpp0v5 \
     libgcrypt20-dev \
     nginx \
-    php-fpm \
-    php-mysql \
-    php-gd \
-    php-curl \
-    php-mbstring \
-    php-xml \
-    php-zip \
-    php-json \
+    php8.1-fpm \
+    php8.1-mysql \
+    php8.1-gd \
+    php8.1-curl \
+    php8.1-mbstring \
+    php8.1-xml \
+    php8.1-zip \
     mysql-server \
     mysql-client \
-    default-mysql-client \
     freeradius \
     freeradius-mysql \
+    libtalloc-dev \
+    default-libmysqlclient-dev \
+    libgdbm-dev \
+    libcap-dev \
     dnsmasq \
-    hostapd && \
+    hostapd \
+    ssl-cert \
+    unzip && \
     rm -rf /var/lib/apt/lists/*
+
+# Build FreeRADIUS 3.2.x from source
+# This overlays the Ubuntu 3.0.x binaries with 3.2.x which has proper MySQL 8.0
+# support and no MYSQL_OPT_RECONNECT deprecation.
+# --with-raddbdir=/etc/freeradius/3.0 matches the Ubuntu package config path
+RUN git clone --depth 1 --branch v3.2.x \
+        https://github.com/FreeRADIUS/freeradius-server.git /tmp/freeradius-src && \
+    cd /tmp/freeradius-src && \
+    ./configure \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --with-raddbdir=/etc/freeradius/3.0 \
+        --with-logdir=/var/log/freeradius \
+        --with-mysql \
+        --without-rlm_sql_postgresql \
+        --without-rlm_sql_iodbc \
+        --without-rlm_ldap \
+        --without-rlm_eap_pwd && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/freeradius-src
 
 # Clone and build CoovaChilli
 RUN git clone --depth 1 https://github.com/coova/coova-chilli.git /tmp/coova-chilli && \
@@ -74,6 +104,11 @@ RUN git clone --depth 1 https://github.com/coova/coova-chilli.git /tmp/coova-chi
     ./configure --prefix=/usr --sysconfdir=/etc/chilli --localstatedir=/var --with-openssl && \
     make && \
     make install && \
+    # Register the init.d service script so `service chilli start` works
+    if [ -f /etc/chilli/init.d/chilli ]; then \
+        ln -sf /etc/chilli/init.d/chilli /etc/init.d/chilli && \
+        update-rc.d chilli defaults 2>/dev/null || true; \
+    fi && \
     rm -rf /tmp/coova-chilli
 
 # Create necessary directories
@@ -91,9 +126,6 @@ COPY docker/config/ /etc/wifi-hotspot-config/
 # Copy init script
 COPY docker/init.sh /usr/local/bin/init-hotspot
 RUN chmod +x /usr/local/bin/init-hotspot
-
-# Create symlink for FreeRADIUS SQL module
-RUN ln -sf /etc/freeradius/3.0/mods-available/sql /etc/freeradius/3.0/mods-enabled/sql
 
 # Enable services
 RUN echo "START_CHILLI=1" > /etc/default/chilli

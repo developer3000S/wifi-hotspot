@@ -9,14 +9,14 @@ echo "=== WiFi Hotspot Docker Setup ==="
 echo ""
 
 # Step 1: Stop and remove old containers
-echo "[1/4] Stopping and removing old containers..."
+echo "[1/5] Stopping and removing old containers..."
 docker stop wifi-hotspot daloradius 2>/dev/null || true
 docker rm -f wifi-hotspot daloradius 2>/dev/null || true
 echo "✓ Old containers removed"
 echo ""
 
 # Step 2: Remove old images
-echo "[2/4] Removing old images..."
+echo "[2/5] Removing old images..."
 # Get the project image name (built from Dockerfile)
 PROJECT_IMAGE=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep -E "wifi-hotspot|${PWD##*/}" | head -1 || true)
 if [ -n "$PROJECT_IMAGE" ]; then
@@ -30,7 +30,7 @@ echo "✓ Dangling images removed"
 echo ""
 
 # Step 3: Remove old volumes and networks
-echo "[3/4] Cleaning up old volumes and networks..."
+echo "[3/5] Cleaning up old volumes and networks..."
 docker compose down -v 2>/dev/null || true
 echo "✓ Volumes and networks cleaned"
 echo ""
