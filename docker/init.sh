@@ -67,8 +67,15 @@ init_mysql() {
         log "MySQL data directory initialized"
     fi
 
-    # Start MySQL
-    service mysql start || mysqld_safe --user=mysql &
+    # Stop any already-running MySQL (e.g. from a previous container run with network_mode: host)
+    if mysqladmin -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" ping --silent 2>/dev/null || \
+       mysqladmin -u root --password="" ping --silent 2>/dev/null; then
+        log "MySQL already running — reusing existing instance"
+    else
+        service mysql stop 2>/dev/null || pkill -x mysqld 2>/dev/null || true
+        sleep 1
+        service mysql start || mysqld_safe --user=mysql &
+    fi
     wait_mysql
 
     # Set root password if not set
@@ -532,9 +539,8 @@ start_services() {
     # Apply sysctl settings
     sysctl -p /etc/sysctl.conf || true
     
-    # Start MySQL
-    log "Starting MySQL..."
-    service mysql start || true
+    # MySQL was already started and initialized in init_mysql() — just verify it's up
+    log "Verifying MySQL is ready..."
     wait_mysql || log "WARNING: MySQL may not be fully ready"
     
     # Start FreeRADIUS
