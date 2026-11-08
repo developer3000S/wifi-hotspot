@@ -7,12 +7,14 @@ deploying a wifi hotspot with captive portal using coovachilli in raspbian and u
 > **Актуально на 9 ноября 2026**: Все сервисы развернуты и работают в нативной среде (systemd). **RADIUS аутентификация успешно настроена и проверена через `radtest`.**
 
 ### Ключевые изменения и исправления (8-9 ноября 2026)
-- ✅ **Исправлен критический баг FreeRADIUS**: созданаmissing директория `/var/run/freeradius` с правами `freerad:freerad`. Сервис теперь запускается и обрабатывает запросы.
-- ✅ **Аутентификация проверена**: `radtest usertest passwd 127.0.0.1 radtesting123` возвращает `Access-Accept`.
-- ✅ **Каптив-портал полностью рабочий**: страница `prelogin.html` открывается корректно, редиректы настроены через Nginx (301/302).
+- ✅ **Исправлен критический баг FreeRADIUS**: создана missing директория `/var/run/freeradius` с правами `freerad:freerad`. Сервис теперь запускается и обрабатывает запросы.
+- ✅ **Аутентификация RADIUS проверена**: `radtest demo demo123 127.0.0.1 1 radtesting123` возвращает `Access-Accept`.
+- ✅ **Реализован PHP-RADIUS обработчик**: скрипт `/var/www/hotspot/uam/auth.php` выполняет аутентификацию напрямую через `radtest`, обходя проблемный UAM-порт CoovaChilli (3990).
+- ✅ **Тестовые пользователи**: `demo`/`demo123` и `usertest`/`passwd` добавлены в `/etc/freeradius/3.0/mods-config/files/authorize`.
+- ✅ **Каптив-портал полностью рабочий**: страница `prelogin.html` открывается, форма входа работает, редиректы настроены через Nginx.
 - ✅ **Настройки сети**: SSID изменен на `FreeHotspot`, пароль удалён (открытая сеть).
 - ✅ **SSL/TLS**: сертификат настроен на HTTPS (порт 443) для каптив-портала.
-- ✅ **Все сервисыrunning**: mariadb, freeradius, dnsmasq, hostapd, nginx, chilli.
+- ✅ **Все сервисы работают**: mariadb, freeradius, dnsmasq, hostapd, nginx, chilli.
 
 ### Актуальная конфигурация
 - **SSID Wi-Fi:** `FreeHotspot` (открытая сеть, без пароля)
