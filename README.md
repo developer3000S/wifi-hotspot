@@ -2,6 +2,38 @@
 
 deploying a wifi hotspot with captive portal using coovachilli in raspbian and ubuntu
 
+## Текущее состояние проекта
+
+> **Актуально на 8 ноября 2026**: Все сервисы развернуты и работают в Docker-окружении.
+
+### Актуальная конфигурация
+- **SSID Wi-Fi:** `FreeHotspot` (открытая сеть, без пароля)
+- **SSL/TLS:** Настроен на HTTPS (порт 443) для каптив-портала
+- **Протокол аутентификации:** BootP/RADIUS (пайплайн из базы данных)
+
+### Рабочие сервисы
+| Сервис | Статус | Описание |
+|--------|--------|----------|
+| **mariadb** | ✅ Активен | Баз данных для FreeRADIUS |
+| **freeradius** | ✅ Активен | RADIUS-сервер аутентификации |
+| **dnsmasq** | ✅ Активен | DHCP и DNS-сервер |
+| **hostapd** | ✅ Активен | Контроллер Wi-Fi точки доступа |
+| **nginx** | ✅ Активен | Веб-сервер для каптив-портала (HTTP/HTTPS) |
+| **chilli** | ✅ Активен | CoovaChilli captive portal |
+
+### Управление сервисами
+В проекте предусмотрены скрипты для удобного управления:
+
+- `./hotspot-management.sh` — встроенный скрипт управления всеми сервисами
+- `./start-local.sh` — скрипт для локального развертывания
+
+### Используемые технологии
+- **CoovaChilli** — контроллер каптив-портала
+- **FreeRADIUS + MariaDB** — аутентификация и базы данных
+- **hostapd** — Wi-Fi точка доступа
+- **dnsmasq** — DHCP/DNS сервер
+- **nginx + PHP-FPM** — веб-сервер для портала
+
 ## Requirements
 
 In order to build a captive portal solution, we will need the following:
@@ -50,14 +82,14 @@ Change the following parameters in hostapd.conf file:
 ```bash
 interface=wlan0 # Change this to your wifi interface
 driver=nl80211
-ssid=MyWiFiHotspot  # Change this to your SSID
+ssid=FreeHotspot  # Change this to your SSID
 #hw_mode=g
 channel=1 # Enter your desired channel
 macaddr_acl=0
 auth_algs=1
 ignore_broadcast_ssid=0
 ```
-**_Note: 
+**_Note:
 You have to delete all the comments in the hostpad config file. Hostapd doesn't support comments in the config file._**
 
 Test and start hostapd:
