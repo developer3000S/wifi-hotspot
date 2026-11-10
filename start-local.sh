@@ -5,6 +5,11 @@
 
 set -e
 
+# Load configuration from .env file if it exists
+if [ -f "$(dirname "$0")/.env" ]; then
+    source "$(dirname "$0")/.env"
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -37,20 +42,20 @@ DNSMASQ_CONF="/etc/dnsmasq.conf"
 SYSCTL_CONF="/etc/sysctl.conf"
 UP_SCRIPT="/etc/chilli/up.sh"
 
-# Configuration variables
-WIFI_SSID="MyWiFiHotspot"
-WIFI_CHANNEL="1"
-WIFI_INTERFACE="wlan0"
-WAN_INTERFACE="eth0"
-HOTSPOT_NETWORK="10.10.10.0"
-HOTSPOT_NETMASK="255.255.255.0"
-HOTSPOT_IP="10.10.10.1"
-UAM_PORT="3990"
-UAM_UI_PORT="4990"
-RADIUS_SECRET="radtesting123"
-UAM_SECRET="uamtesting123"
-MYSQL_ROOT_PASSWORD="raspbian"
-RADIUS_DB_PASSWORD="radtesting123"
+# Configuration variables (with defaults if not in .env)
+WIFI_SSID="${WIFI_SSID:-MyWiFiHotspot}"
+WIFI_CHANNEL="${WIFI_CHANNEL:-1}"
+WIFI_INTERFACE="${WIFI_INTERFACE:-wlan0}"
+WAN_INTERFACE="${WAN_INTERFACE:-eth0}"
+HOTSPOT_NETWORK="${HOTSPOT_NETWORK:-10.10.10.0}"
+HOTSPOT_NETMASK="${HOTSPOT_NETMASK:-255.255.255.0}"
+HOTSPOT_IP="${HOTSPOT_IP:-10.10.10.1}"
+UAM_PORT="${UAM_PORT:-3990}"
+UAM_UI_PORT="${UAM_UI_PORT:-4990}"
+RADIUS_SECRET="${RADIUS_SECRET:-radtesting123}"
+UAM_SECRET="${UAM_SECRET:-uamtesting123}"
+MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-raspbian}"
+RADIUS_DB_PASSWORD="${RADIUS_DB_PASSWORD:-radtesting123}"
 
 # ==============================================================================
 # STEP 1: Install required packages
@@ -98,11 +103,6 @@ hw_mode=g
 channel=$WIFI_CHANNEL
 macaddr_acl=0
 auth_algs=1
-wpa=2
-wpa_key_mgmt=WPA-PSK
-wpa_pairwise=CCMP
-rsn_pairwise=CCMP
-wpa_passphrase=password123
 ignore_broadcast_ssid=0
 EOF
 
