@@ -95,6 +95,10 @@ apt-get install -y \
 
 log_info "Packages installed successfully"
 
+# Разрешить www-data запускать chilli_query (нужно для авторизации сессий в auth.php)
+echo "www-data ALL=(ALL) NOPASSWD: /usr/sbin/chilli_query" > /etc/sudoers.d/wifi-hotspot
+chmod 440 /etc/sudoers.d/wifi-hotspot
+
 # ==============================================================================
 # STEP 2: Configure hostapd
 # ==============================================================================
@@ -367,78 +371,6 @@ log_info "Step 8: Creating captive portal web files..."
 
 mkdir -p "$WEB_DIR"
 
-# Create main page
-cat > "$WEB_DIR/index.html" <<'HTMLEOF'
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wi-Fi Hotspot - Welcome</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-        .container { max-width: 400px; margin: 50px auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #333; text-align: center; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 5px; font-weight: bold; }
-        input[type=text], input[type=password] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-        button:hover { background: #0056b3; }
-        .message { padding: 10px; margin-bottom: 15px; border-radius: 4px; }
-        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Welcome to Wi-Fi Hotspot</h1>
-        <div id="message"></div>
-        <form id="loginForm">
-            <div class="form-group">
-                <label for="username">Username:</label>
-                <input type="text" id="username" name="username" required>
-            </div>
-            <div class="form-group">
-                <label for="password">Password:</label>
-                <input type="password" id="password" name="password" required>
-            </div>
-            <button type="submit">Connect</button>
-        </form>
-        <p style="text-align:center; margin-top:15px; color:#666;">
-            Demo: username: <strong>demo</strong>, password: <strong>demo123</strong>
-        </p>
-    </div>
-    <script>
-        document.getElementById('loginForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            var username = document.getElementById('username').value;
-            var password = document.getElementById('password').value;
-            
-            var url = window.location.origin + ':3990/logon';
-            var params = 'username=' + encodeURIComponent(username) + '&password=' + encodeURIComponent(password);
-            
-            fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: params
-            })
-            .then(function(response) {
-                if (response.ok) {
-                    document.getElementById('message').innerHTML = '<div class="success">Login successful! You can now access the internet.</div>';
-                    setTimeout(function() { window.location.href = 'http://www.google.com'; }, 1500);
-                } else {
-                    document.getElementById('message').innerHTML = '<div class="error">Login failed. Please check your credentials.</div>';
-                }
-            })
-            .catch(function(error) {
-                document.getElementById('message').innerHTML = '<div class="error">Connection error. Please try again.</div>';
-            });
-        });
-    </script>
-</body>
-</html>
-HTMLEOF
-
 # Create prelogin page
 cat > "$WEB_DIR/prelogin" <<'HTMLEOF'
 <!DOCTYPE html>
@@ -494,43 +426,45 @@ button:hover{background:#0056b3}
 <div class="card">
 <h2>Wi-Fi Hotspot</h2>
 <p>Войдите, чтобы получить доступ в интернет</p>
-<form id="f">
+<form id="f" action="/uam/auth.php" method="post">
 <input type="text" name="username" placeholder="Логин" required autofocus>
 <input type="password" name="password" placeholder="Пароль" required>
 <button type="submit">Войти</button>
 </form>
 <div class="msg err" id="e">Неверный логин или пароль</div>
-<div class="msg ok" id="s">Успешно! Вы можете пользоваться интернетом.</div>
 </div>
 <script>
-document.getElementById("f").onsubmit=function(t){t.preventDefault();var n=new FormData(this);fetch("/uam/auth.php",{method:"POST",body:n,credentials:"same-origin"}).then(function(t){return t.ok?t.text():Promise.reject(t)}).then(function(){document.getElementById("s").style.display="block";setTimeout(function(){location.href="https://www.google.com";},1500)}).catch(function(){document.getElementById("e").style.display="block"});};
+document.getElementById('f').onsubmit=function(){var b=document.querySelector('button');b.disabled=true;b.textContent='Вход...';};
 </script>
 </body>
 </html>
 HTMLEOF
 
-# UAM login handler: radtest against FreeRADIUS (PostgreSQL)
+# UAM login handler: radtest + chilli_query authorize (FreeRADIUS/PostgreSQL + CoovaChilli session authorization)
 cat > "$WEB_DIR/uam/auth.php" <<'PHPEOF'
 <?php
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') { http_response_code(405); exit('Метод не разрешен'); }
-$username = $_POST['username'] ?? '';
-$password = $_POST['password'] ?? '';
-if ($username === '' || $password === '') { exit('Логин и пароль обязательны'); }
-$username = escapeshellarg($username);
-$password = escapeshellarg($password);
-$cmd = "/usr/bin/radtest $username $password 127.0.0.1 1 radtesting123";
+$username_raw = $_POST['username'] ?? '';
+$password_raw = $_POST['password'] ?? '';
+$client_ip = $_SERVER['REMOTE_ADDR'] ?? '';
+if ($username_raw === '' || $password_raw === '') { exit('Логин и пароль обязательны'); }
+if ($client_ip === '' || $client_ip === '127.0.0.1' || $client_ip === '::1') { exit('Не удалось определить IP-адрес клиента'); }
+$sockets = glob('/var/run/chilli.*.sock');
+$socket = $sockets[0] ?? '/var/run/chilli.wlan0.sock';
+$username = escapeshellarg($username_raw);
+$password = escapeshellarg($password_raw);
+$ip = escapeshellarg($client_ip);
+$cmd = "sudo /usr/sbin/chilli_query -s $socket authorize $ip username $username password $password";
 exec($cmd . " 2>&1", $output, $returncode);
-$output_str = implode("
-", $output);
-if ($returncode === 0 && strpos($output_str, 'Access-Accept') !== false) {
+$output_str = implode("\n", $output);
+if ($returncode === 0) {
     header('Location: /uam/?success=1');
-} elseif (strpos($output_str, 'Access-Reject') !== false) {
-    header('Location: /uam/?error=1');
+    exit();
 } else {
-    error_log('RADIUS ошибка: ' . $output_str);
-    header('Location: /uam/?error=2');
+    error_log('Chilli authorize ошибка (' . $returncode . '): ' . $output_str);
+    header('Location: /uam/?error=1');
+    exit();
 }
-exit();
 PHPEOF
 
 log_info "Captive portal web files created"
