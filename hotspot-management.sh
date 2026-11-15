@@ -4,11 +4,17 @@
 # WiFi Hotspot Service Management Script
 # Usage: ./hotspot-management.sh {start|stop|restart|status} [service]
 #
-# Manages WiFi hotspot components: MariaDB, FreeRADIUS, dnsmasq, hostapd, nginx, chilli
+# Manages WiFi hotspot components: PostgreSQL, FreeRADIUS, dnsmasq, hostapd, nginx, chilli
 #########################################################################
 
+# Load configuration from .env file if it exists
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    source "$SCRIPT_DIR/.env"
+fi
+
 SERVICES=(
-    "mariadb"
+    "postgresql"
     "freeradius"
     "dnsmasq"
     "hostapd"
@@ -24,12 +30,26 @@ is_running() {
     systemctl is-active --quiet "$1"
 }
 
+# Wait until PostgreSQL accepts connections
+wait_for_postgres() {
+    command -v pg_isready >/dev/null 2>&1 || return 0
+    for _ in $(seq 1 30); do
+        if pg_isready -h "${DB_HOST:-localhost}" -p "${DB_PORT:-5432}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "WARNING: PostgreSQL is not ready on ${DB_HOST:-localhost}:${DB_PORT:-5432}"
+    return 1
+}
+
 # Function to start a service
 start_service() {
     if ! is_running "$1"; then
         echo "Starting $1..."
         systemctl start "$1"
         sleep 2
+        [ "$1" = "postgresql" ] && wait_for_postgres
         systemctl status "$1" --no-pager 2>&1 | head -n 5
     else
         echo "$1 is already running"
@@ -52,6 +72,7 @@ restart_service() {
     echo "Restarting $1..."
     systemctl restart "$1"
     sleep 2
+    [ "$1" = "postgresql" ] && wait_for_postgres
     systemctl status "$1" --no-pager 2>&1 | head -n 5
 }
 

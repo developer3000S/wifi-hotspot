@@ -5,6 +5,12 @@
 
 set -e
 
+# Load configuration from .env file if it exists
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    source "$SCRIPT_DIR/.env"
+fi
+
 echo "=== WiFi Hotspot Docker Setup ==="
 echo ""
 
@@ -35,27 +41,27 @@ docker compose down -v 2>/dev/null || true
 echo "✓ Volumes and networks cleaned"
 echo ""
 
-# Step 4: Free port 3306 if occupied (required for network_mode: host)
-echo "[4/6] Checking port 3306..."
-if ss -tlnp | grep -q ':3306'; then
-    echo "  Port 3306 is in use, freeing..."
-    # Stop systemd mariadb socket/service if active
-    systemctl stop mariadb.socket mariadb.service 2>/dev/null || true
-    systemctl disable mariadb.socket mariadb.service 2>/dev/null || true
-    # Kill any remaining process holding port 3306
-    PIDS=$(ss -tlnp | grep ':3306' | grep -oP 'pid=\K[0-9]+' || true)
+# Step 4: Free port 5432 if occupied (required for network_mode: host)
+echo "[4/6] Checking port 5432..."
+if ss -tlnp | grep -q ':5432'; then
+    echo "  Port 5432 is in use, freeing..."
+    # Stop host PostgreSQL service if active
+    systemctl stop postgresql postgresql@17-main 2>/dev/null || true
+    systemctl disable postgresql 2>/dev/null || true
+    # Kill any remaining process holding port 5432
+    PIDS=$(ss -tlnp | grep ':5432' | grep -oP 'pid=\K[0-9]+' || true)
     if [ -n "$PIDS" ]; then
         echo "  Killing PIDs: $PIDS"
         kill -9 $PIDS 2>/dev/null || true
         sleep 1
     fi
-    if ss -tlnp | grep -q ':3306'; then
-        echo "✗ ERROR: Could not free port 3306. Please stop the service using it manually."
+    if ss -tlnp | grep -q ':5432'; then
+        echo "✗ ERROR: Could not free port 5432. Please stop the service using it manually."
         exit 1
     fi
-    echo "✓ Port 3306 freed"
+    echo "✓ Port 5432 freed"
 else
-    echo "✓ Port 3306 is free"
+    echo "✓ Port 5432 is free"
 fi
 echo ""
 

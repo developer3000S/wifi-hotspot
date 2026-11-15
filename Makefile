@@ -103,7 +103,7 @@ rebuild: clean build run
 
 # Create data directories
 init-data:
-	mkdir -p docker/data/mysql
+	mkdir -p docker/data/postgres
 	mkdir -p docker/data/logs
 	mkdir -p docker/data/chilli
 	mkdir -p docker/data/hostapd

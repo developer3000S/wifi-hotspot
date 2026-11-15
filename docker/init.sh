@@ -18,121 +18,115 @@ is_running() {
     pgrep -x "$1" > /dev/null 2>&1
 }
 
-# Function to wait for MySQL to be ready
-wait_mysql() {
+# Function to wait for PostgreSQL to be ready
+wait_postgres() {
     local max_attempts=30
     local attempt=1
 
     while true; do
-        # Try without password first (fresh --initialize-insecure install)
-        if mysql -u root --password="" -e "SELECT 1" > /dev/null 2>&1; then
-            log "MySQL is ready (no password)"
-            return 0
-        fi
-        # Try with configured password (subsequent runs)
-        if mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e "SELECT 1" > /dev/null 2>&1; then
-            log "MySQL is ready"
+        if pg_isready -h "${DB_HOST:-127.0.0.1}" -p "${DB_PORT:-5432}" > /dev/null 2>&1; then
+            log "PostgreSQL is ready"
             return 0
         fi
         if [ $attempt -ge $max_attempts ]; then
-            log "ERROR: MySQL did not start in time"
+            log "ERROR: PostgreSQL did not start in time"
             return 1
         fi
-        log "Waiting for MySQL... (attempt $attempt/$max_attempts)"
+        log "Waiting for PostgreSQL... (attempt $attempt/$max_attempts)"
         sleep 2
         ((attempt++))
     done
 }
 
-# Function to initialize MySQL database
-init_mysql() {
-    log "Initializing MySQL database..."
+# Function to initialize PostgreSQL database
+init_postgres() {
+    log "Initializing PostgreSQL database..."
 
-    # Fix mysql user home directory (common Docker issue)
-    mkdir -p /nonexistent 2>/dev/null || true
+    PG_VERSION_NUM=$(ls /usr/lib/postgresql 2>/dev/null | sort -V | tail -1)
+    PGDATA="${PGDATA:-/var/lib/postgresql/data}"
+    PG_BIN="/usr/lib/postgresql/${PG_VERSION_NUM}/bin"
 
-    # Create MySQL log directory (required by MySQL 8.0)
-    mkdir -p /var/log/mysql
-    touch /var/log/mysql/error.log
-    chown -R mysql:mysql /var/log/mysql
+    mkdir -p "$PGDATA" /var/log/postgresql /var/run/postgresql
+    chown -R postgres:postgres "$PGDATA" /var/log/postgresql /var/run/postgresql
 
-    # Fix permissions on data directory
-    chown -R mysql:mysql /var/lib/mysql 2>/dev/null || true
-
-    # Initialize MySQL data directory if empty (first run with volume mount)
-    if [ ! -d /var/lib/mysql/mysql ]; then
-        log "Initializing MySQL data directory..."
-        mysqld --initialize-insecure --user=mysql --datadir=/var/lib/mysql 2>/dev/null || \
-        mysql_install_db --user=mysql --datadir=/var/lib/mysql 2>/dev/null || true
-        log "MySQL data directory initialized"
+    # Initialize data directory on first run (volume may be empty)
+    if [ ! -f "$PGDATA/PG_VERSION" ]; then
+        log "Initializing PostgreSQL data directory..."
+        runuser -u postgres -- "$PG_BIN/initdb" -D "$PGDATA" \
+            --auth-local=trust --auth-host=scram-sha-256 > /dev/null
+        log "PostgreSQL data directory initialized"
     fi
 
-    # Stop any already-running MySQL (e.g. from a previous container run with network_mode: host)
-    if mysqladmin -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" ping --silent 2>/dev/null || \
-       mysqladmin -u root --password="" ping --silent 2>/dev/null; then
-        log "MySQL already running — reusing existing instance"
+    # Start PostgreSQL if it is not already running
+    if runuser -u postgres -- "$PG_BIN/pg_ctl" -D "$PGDATA" status > /dev/null 2>&1; then
+        log "PostgreSQL already running - reusing existing instance"
     else
-        service mysql stop 2>/dev/null || pkill -x mysqld 2>/dev/null || true
-        sleep 1
-        service mysql start || mysqld_safe --user=mysql &
+        runuser -u postgres -- "$PG_BIN/pg_ctl" -D "$PGDATA" \
+            -l /var/log/postgresql/postgresql.log \
+            -o "-c listen_addresses=127.0.0.1 -p ${DB_PORT:-5432}" start
     fi
-    wait_mysql
+    wait_postgres
 
-    # Set root password if not set
-    mysql -u root --connect-expired-password -e \
-        "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD:-raspbian}';" 2>/dev/null || true
-
-    # Create radius database if it doesn't exist
-    mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e "CREATE DATABASE IF NOT EXISTS ${RADIUS_DB_NAME:-radius};" || true
-
-    # Create radius user if it doesn't exist
-    mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e \
-        "CREATE USER IF NOT EXISTS '${RADIUS_DB_USER:-appdemoradius}'@'%' IDENTIFIED BY '${RADIUS_DB_PASSWORD:-raspbian}';" || true
-
-    # Grant privileges
-    mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e \
-        "GRANT ALL PRIVILEGES ON ${RADIUS_DB_NAME:-radius}.* TO '${RADIUS_DB_USER:-appdemoradius}'@'%';" || true
-
-    # Flush privileges
-    mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e "FLUSH PRIVILEGES;" || true
-
-    # Import FreeRADIUS schema (search in multiple possible locations)
-    if [ ! -f /var/lib/mysql/radius/radcheck.ibd ]; then
-        SCHEMA_FILE=""
-        for p in \
-            /etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql \
-            /usr/share/freeradius/3.0/mods-config/sql/main/mysql/schema.sql \
-            $(find /usr/share/doc -name 'schema.sql' 2>/dev/null | grep -i mysql | head -1); do
-            [ -f "$p" ] && SCHEMA_FILE="$p" && break
-        done
-        if [ -n "$SCHEMA_FILE" ]; then
-            log "Importing FreeRADIUS schema from $SCHEMA_FILE..."
-            mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" ${RADIUS_DB_NAME:-radius} \
-                < "$SCHEMA_FILE" 2>/dev/null || true
-        else
-            log "WARNING: FreeRADIUS schema.sql not found, skipping schema import"
-        fi
+    # Create or update the RADIUS role
+    if ! runuser -u postgres -- psql -p "${DB_PORT:-5432}" -tAc \
+        "SELECT 1 FROM pg_roles WHERE rolname='${RADIUS_DB_USER:-freerad}'" | grep -q 1; then
+        runuser -u postgres -- psql -p "${DB_PORT:-5432}" -c \
+            "CREATE ROLE \"${RADIUS_DB_USER:-freerad}\" LOGIN PASSWORD '${RADIUS_DB_PASSWORD:-radtesting123}';"
+    else
+        runuser -u postgres -- psql -p "${DB_PORT:-5432}" -c \
+            "ALTER ROLE \"${RADIUS_DB_USER:-freerad}\" WITH LOGIN PASSWORD '${RADIUS_DB_PASSWORD:-radtesting123}';"
     fi
 
-    # Create test user if it doesn't exist
-    mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" ${RADIUS_DB_NAME:-radius} -e \
-        "INSERT INTO radcheck (username, attribute, op, value) VALUES ('usertest', 'Cleartext-Password', ':=', 'passwd') ON DUPLICATE KEY UPDATE username='usertest';" 2>/dev/null || true
+    # Create the RADIUS database if it does not exist
+    if ! runuser -u postgres -- psql -p "${DB_PORT:-5432}" -tAc \
+        "SELECT 1 FROM pg_database WHERE datname='${RADIUS_DB_NAME:-radius}'" | grep -q 1; then
+        runuser -u postgres -- createdb -p "${DB_PORT:-5432}" \
+            -O "${RADIUS_DB_USER:-freerad}" "${RADIUS_DB_NAME:-radius}"
+    fi
 
-    log "MySQL initialization completed"
+    # Import the FreeRADIUS schema once
+    SCHEMA_FILE=""
+    for p in \
+        /etc/freeradius/3.0/mods-config/sql/main/postgresql/schema.sql \
+        /usr/share/freeradius/3.0/mods-config/sql/main/postgresql/schema.sql; do
+        [ -f "$p" ] && SCHEMA_FILE="$p" && break
+    done
+
+    if [ -n "$SCHEMA_FILE" ] && ! PGPASSWORD="${RADIUS_DB_PASSWORD:-radtesting123}" psql \
+        -h "${DB_HOST:-127.0.0.1}" -p "${DB_PORT:-5432}" -U "${RADIUS_DB_USER:-freerad}" \
+        -d "${RADIUS_DB_NAME:-radius}" -tAc "SELECT to_regclass('public.radcheck')" 2>/dev/null | grep -q radcheck; then
+        log "Importing FreeRADIUS schema from $SCHEMA_FILE..."
+        PGPASSWORD="${RADIUS_DB_PASSWORD:-radtesting123}" psql \
+            -h "${DB_HOST:-127.0.0.1}" -p "${DB_PORT:-5432}" -U "${RADIUS_DB_USER:-freerad}" \
+            -d "${RADIUS_DB_NAME:-radius}" -f "$SCHEMA_FILE" > /dev/null 2>&1 || \
+            log "WARNING: FreeRADIUS schema import failed"
+    fi
+
+    # Create test users and a local NAS client
+    PGPASSWORD="${RADIUS_DB_PASSWORD:-radtesting123}" psql \
+        -h "${DB_HOST:-127.0.0.1}" -p "${DB_PORT:-5432}" -U "${RADIUS_DB_USER:-freerad}" \
+        -d "${RADIUS_DB_NAME:-radius}" > /dev/null 2>&1 <<SQL || true
+DELETE FROM radcheck WHERE username IN ('demo', 'usertest');
+INSERT INTO radcheck (username, attribute, op, value) VALUES
+    ('demo', 'Cleartext-Password', ':=', 'demo123'),
+    ('usertest', 'Cleartext-Password', ':=', '${TEST_PASSWORD:-passwd}');
+DELETE FROM nas WHERE nasname IN ('127.0.0.1', 'localhost');
+INSERT INTO nas (nasname, shortname, type, secret, description) VALUES
+    ('127.0.0.1', 'localhost', 'other', '${HS_RADSECRET:-radtesting123}', 'Local RADIUS client'),
+    ('localhost', 'localhost', 'other', '${HS_RADSECRET:-radtesting123}', 'RADIUS Client');
+SQL
+
+    log "PostgreSQL initialization completed"
 }
 
 # Function to configure FreeRADIUS
 configure_freeradius() {
     log "Configuring FreeRADIUS..."
 
-    # Give freerad user access to MySQL socket
-    usermod -aG mysql freerad 2>/dev/null || true
-
     # Create necessary directories (may be missing due to empty volume mount)
     mkdir -p /etc/freeradius/3.0/mods-enabled/
     mkdir -p /etc/freeradius/3.0/mods-available/
     mkdir -p /etc/freeradius/3.0/sites-available/
-    mkdir -p /etc/freeradius/3.0/mods-config/sql/main/mysql/
 
     # Configure clients.conf - create minimal version if doesn't exist
     if [ ! -f /etc/freeradius/3.0/clients.conf ]; then
@@ -156,27 +150,34 @@ EOF
         sed -i "s/secret = testing123/secret = ${HS_RADSECRET:-radtesting123}/g" /etc/freeradius/3.0/clients.conf || true
     fi
 
-    # Always write a fresh minimal sql config (the original mods-available/sql
-    # has all credentials commented out; sed-patching is unreliable on it)
-    # Break existing symlink if present
-    rm -f /etc/freeradius/3.0/mods-enabled/sql
-    cat > /etc/freeradius/3.0/mods-enabled/sql <<EOF
+    # Write a fresh PostgreSQL sql module config
+    cat > /etc/freeradius/3.0/mods-available/sql <<EOF
 sql {
-    driver = "rlm_sql_mysql"
-    dialect = "mysql"
+    dialect = "postgresql"
+    driver = "rlm_sql_postgresql"
 
-    # Use 127.0.0.1 (not localhost) to force TCP instead of Unix socket
-    server = "127.0.0.1"
-    port = 3306
-    login = "${RADIUS_DB_USER:-appdemoradius}"
-    password = "${RADIUS_DB_PASSWORD:-raspbian}"
+    postgresql {
+        send_application_name = yes
+    }
+
+    server = "${DB_HOST:-127.0.0.1}"
+    port = ${DB_PORT:-5432}
+    login = "${RADIUS_DB_USER:-freerad}"
+    password = "${RADIUS_DB_PASSWORD:-radtesting123}"
     radius_db = "${RADIUS_DB_NAME:-radius}"
 
-    read_clients = yes
+    acct_table1 = "radacct"
+    acct_table2 = "radacct"
+    postauth_table = "radpostauth"
+    authcheck_table = "radcheck"
+    groupcheck_table = "radgroupcheck"
+    authreply_table = "radreply"
+    groupreply_table = "radgroupreply"
+    usergroup_table = "radusergroup"
 
-    # FreeRADIUS schema + queries
-    logfile = /var/log/freeradius/sqltrace.sql
-    sql_user_name = "%{User-Name}"
+    read_clients = yes
+    client_table = "nas"
+    group_attribute = "SQL-Group"
 
     pool {
         start = 2
@@ -184,14 +185,22 @@ sql {
         max = 10
         spare = 3
         uses = 0
+        retry_delay = 5
         lifetime = 0
         idle_timeout = 60
+        max_retries = 5
     }
+
+    \$INCLUDE \${modconfdir}/\${.:name}/main/\${dialect}/queries.conf
 }
 EOF
 
-    # Configure default site if it exists
-    sed -i "s/#-sql/-sql/g" /etc/freeradius/3.0/sites-available/default 2>/dev/null || true
+    # Enable the sql module
+    rm -f /etc/freeradius/3.0/mods-enabled/sql
+    ln -s ../mods-available/sql /etc/freeradius/3.0/mods-enabled/sql
+
+    # Configure default site to use SQL
+    sed -i -E "s/^#([[:space:]]*)-sql/\1-sql/" /etc/freeradius/3.0/sites-available/default 2>/dev/null || true
 
     log "FreeRADIUS configuration completed"
 }
@@ -271,10 +280,10 @@ EOF
     cat > /etc/chilli/up.sh << 'EOF'
 #!/bin/bash
 # Enable NAT
-iptables -I POSTROUTING -t nat -o $HS_WANIF -j MASQUERADE
+iptables-nft -I POSTROUTING -t nat -o $HS_WANIF -j MASQUERADE
 # Other iptables rules
-iptables -I FORWARD -i $HS_LANIF -j ACCEPT
-iptables -I FORWARD -o $HS_LANIF -j ACCEPT
+iptables-nft -I FORWARD -i $HS_LANIF -j ACCEPT
+iptables-nft -I FORWARD -o $HS_LANIF -j ACCEPT
 EOF
 
     chmod +x /etc/chilli/up.sh
@@ -317,6 +326,9 @@ no-resolv
 server=8.8.8.8
 server=8.8.4.4
 address=/hotspot.example.com/${HS_UAMLISTEN:-10.10.10.1}
+address=/uam/${HS_UAMLISTEN:-10.10.10.1}
+# Captive portal: resolve all other names to the hotspot gateway
+address=/#/${HS_UAMLISTEN:-10.10.10.1}
 dhcp-range=${HS_UAMALLOW:-10.10.10.0}/24,${HS_DHCP_START:-10.10.10.100},${HS_DHCP_END:-10.10.10.200},${HS_DHCP_LEASE:-24h}
 EOF
     
@@ -458,35 +470,46 @@ NGINXEOF
 
     # Create hotspot site configuration
     # Listen on 0.0.0.0 so nginx starts even before the hotspot interface (10.10.10.1) is up
+    PHP_FPM_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | head -1 || echo /run/php/php8.1-fpm.sock)
     cat > /etc/nginx/sites-available/hotspot.example.com <<EOF
 server {
     listen 80 default_server;
-    server_name hotspot.example.com ${HS_UAMLISTEN:-10.10.10.1};
-    return 301 https://\$server_name\$request_uri;
+    server_name _;
+    root /var/www/hotspot.example.com;
+    index index.html index.php;
+
+    # Captive portal landing page (HTTP). All client DNS resolves here.
+    location / {
+        try_files \$uri \$uri/ /index.html =404;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
 }
 
 server {
     listen 443 ssl default_server;
-    server_name hotspot.example.com ${HS_UAMLISTEN:-10.10.10.1};
-    
+    server_name _;
+    root /var/www/hotspot.example.com;
+    index index.html;
+
     ssl_certificate /etc/ssl/certs/snakeoil.pem;
     ssl_certificate_key /etc/ssl/private/snakeoil.key;
-    
-    root /var/www/hotspot.example.com;
-    index hotspotlogin.php index.php index.phtml index.html index.htm;
-    
+
     location / {
-        try_files \$uri \$uri/ /index.php?\$args /hotspotlogin.php?\$args =404;
+        try_files \$uri \$uri/ /index.html =404;
     }
-    
-    location ~ \.php\$ {
+
+    location ~ \.php$ {
         include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+        fastcgi_pass unix:${PHP_FPM_SOCK};
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     }
 }
 EOF
-    
     # Enable the site
     ln -sf /etc/nginx/sites-available/hotspot.example.com /etc/nginx/sites-enabled/
     
@@ -539,9 +562,9 @@ start_services() {
     # Apply sysctl settings
     sysctl -p /etc/sysctl.conf || true
     
-    # MySQL was already started and initialized in init_mysql() — just verify it's up
-    log "Verifying MySQL is ready..."
-    wait_mysql || log "WARNING: MySQL may not be fully ready"
+    # PostgreSQL was already started and initialized in init_postgres() — just verify it's up
+    log "Verifying PostgreSQL is ready..."
+    wait_postgres || log "WARNING: PostgreSQL may not be fully ready"
     
     # Start FreeRADIUS
     log "Starting FreeRADIUS..."
@@ -609,7 +632,9 @@ stop_services() {
     service php7.4-fpm stop || true
     service dnsmasq stop || true
     service freeradius stop || true
-    service mysql stop || true
+    if [ -n "${PGDATA:-}" ] && [ -n "${PG_BIN:-}" ]; then
+        runuser -u postgres -- "$PG_BIN/pg_ctl" -D "$PGDATA" stop -m fast > /dev/null 2>&1 || true
+    fi
     
     log "All services stopped"
 }
@@ -618,7 +643,7 @@ stop_services() {
 show_status() {
     log "=== Service Status ==="
     
-    for service in mysql freeradius dnsmasq nginx php7.4-fpm chilli hostapd; do
+    for service in postgres freeradius dnsmasq nginx php7.4-fpm chilli hostapd; do
         if is_running $service; then
             log "$service: RUNNING"
         else
@@ -630,7 +655,7 @@ show_status() {
     log ""
     log "=== Network Information ==="
     ip addr show || true
-    iptables -L -n || true
+    iptables-nft -L -n || true
     
     # Show CoovaChilli status
     log ""
@@ -641,7 +666,7 @@ show_status() {
 # Function to show logs
 tail_logs() {
     log "=== Tailing logs (Ctrl+C to exit) ==="
-    tail -f /var/log/chilli.log /var/log/freeradius/freeradius.log /var/log/nginx/error.log /var/log/mysql/error.log
+    tail -f /var/log/chilli.log /var/log/freeradius/freeradius.log /var/log/nginx/error.log /var/log/postgresql/postgresql.log
 }
 
 # Main execution
@@ -659,8 +684,8 @@ case "$1" in
         # Install hotspot-login
         install_hotspot_login
         
-        # Initialize MySQL
-        init_mysql
+        # Initialize PostgreSQL
+        init_postgres
         
         # Start all services
         start_services
@@ -702,12 +727,15 @@ case "$1" in
     test)
         log "Running service tests..."
         
-        # Test MySQL
-        if is_running mysqld; then
-            log "MySQL: OK"
-            mysql -u root -p"${MYSQL_ROOT_PASSWORD:-raspbian}" -e "SHOW DATABASES;" || log "MySQL: FAILED"
+        # Test PostgreSQL
+        if pg_isready -h "${DB_HOST:-127.0.0.1}" -p "${DB_PORT:-5432}" > /dev/null 2>&1; then
+            log "PostgreSQL: OK"
+            PGPASSWORD="${RADIUS_DB_PASSWORD:-radtesting123}" psql \
+                -h "${DB_HOST:-127.0.0.1}" -p "${DB_PORT:-5432}" \
+                -U "${RADIUS_DB_USER:-freerad}" -d "${RADIUS_DB_NAME:-radius}" \
+                -c "SELECT COUNT(*) FROM radcheck;" || log "PostgreSQL: FAILED"
         else
-            log "MySQL: NOT RUNNING"
+            log "PostgreSQL: NOT RUNNING"
         fi
         
         # Test FreeRADIUS
@@ -750,8 +778,8 @@ case "$1" in
         # Install hotspot-login
         install_hotspot_login
         
-        # Initialize MySQL
-        init_mysql
+        # Initialize PostgreSQL
+        init_postgres
         
         # Start all services
         start_services

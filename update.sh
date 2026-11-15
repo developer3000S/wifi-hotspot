@@ -3,6 +3,12 @@
 # Скрипт для автоматического обновления репозитория на GitHub
 # Использование: ./update.sh "Ваш комментарий к коммиту"
 
+# Load configuration from .env file if it exists
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    source "$SCRIPT_DIR/.env"
+fi
+
 # Проверка на наличие комментария
 if [ -z "$1" ]; then
     echo "Ошибка: Пожалуйста, укажите комментарий к коммиту."

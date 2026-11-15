@@ -27,14 +27,19 @@ services:
       - HS_RADSECRET=radtesting123
       - HS_UAMSECRET=uamtesting123
       - HS_TCP_PORTS="80 443"
-      - MYSQL_ROOT_PASSWORD=raspbian
-      - RADIUS_DB_USER=appdemoradius
-      - RADIUS_DB_PASSWORD=raspbian
+      # PostgreSQL (embedded in the container)
+      - DB_HOST=127.0.0.1
+      - DB_PORT=5432
+      - DB_NAME=radius
+      - DB_USER=freerad
+      - DB_PASSWORD=radtesting123
+      - RADIUS_DB_USER=freerad
+      - RADIUS_DB_PASSWORD=radtesting123
       - RADIUS_DB_NAME=radius
       - HOTSPOT_SSID=MME Captive Portal
     volumes:
       - ./docker/config:/etc/wifi-hotspot-config:ro
-      - ./docker/data/mysql:/var/lib/mysql
+      - ./docker/data/postgres:/var/lib/postgresql
       - ./docker/data/logs:/var/log
       - ./docker/data/chilli:/var/lib/chilli
       - ./docker/data/hostapd:/etc/hostapd

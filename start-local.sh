@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Wi-Fi Hotspot with Captive Portal - Local Installation Script
-# Installs and configures: CoovaChilli, hostapd, FreeRADIUS, MySQL, Nginx, dnsmasq
+# Installs and configures: CoovaChilli, hostapd, FreeRADIUS, PostgreSQL, Nginx, dnsmasq
 
 set -e
 
@@ -43,9 +43,9 @@ SYSCTL_CONF="/etc/sysctl.conf"
 UP_SCRIPT="/etc/chilli/up.sh"
 
 # Configuration variables (with defaults if not in .env)
-WIFI_SSID="${WIFI_SSID:-MyWiFiHotspot}"
+WIFI_SSID="${WIFI_SSID:-FREEHOTSPOT}"
 WIFI_CHANNEL="${WIFI_CHANNEL:-1}"
-WIFI_INTERFACE="${WIFI_INTERFACE:-wlan0}"
+WIFI_INTERFACE="${WIFI_INTERFACE:-tun0}"
 WAN_INTERFACE="${WAN_INTERFACE:-eth0}"
 HOTSPOT_NETWORK="${HOTSPOT_NETWORK:-10.10.10.0}"
 HOTSPOT_NETMASK="${HOTSPOT_NETMASK:-255.255.255.0}"
@@ -54,8 +54,12 @@ UAM_PORT="${UAM_PORT:-3990}"
 UAM_UI_PORT="${UAM_UI_PORT:-4990}"
 RADIUS_SECRET="${RADIUS_SECRET:-radtesting123}"
 UAM_SECRET="${UAM_SECRET:-uamtesting123}"
-MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-raspbian}"
-RADIUS_DB_PASSWORD="${RADIUS_DB_PASSWORD:-radtesting123}"
+DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="${DB_PORT:-5432}"
+DB_NAME="${DB_NAME:-radius}"
+DB_USER="${DB_USER:-freerad}"
+DB_PASSWORD="${DB_PASSWORD:-radtesting123}"
+RADIUS_DB_PASSWORD="${RADIUS_DB_PASSWORD:-$DB_PASSWORD}"
 
 # ==============================================================================
 # STEP 1: Install required packages
@@ -67,12 +71,13 @@ apt-get update
 apt-get install -y \
     hostapd \
     freeradius \
-    freeradius-mysql \
-    mariadb-server \
+    freeradius-postgresql \
+    postgresql \
+    postgresql-client \
     nginx \
     dnsmasq \
     php-fpm \
-    php-mysql \
+    php-pgsql \
     php-gd \
     php-cli \
     curl \
@@ -114,27 +119,39 @@ systemctl enable hostapd 2>/dev/null || true
 log_info "hostapd configured"
 
 # ==============================================================================
-# STEP 3: Configure MySQL/MariaDB for FreeRADIUS
+# STEP 3: Configure PostgreSQL for FreeRADIUS
 # ==============================================================================
-log_info "Step 3: Configuring MySQL/MariaDB for FreeRADIUS..."
+log_info "Step 3: Configuring PostgreSQL for FreeRADIUS..."
 
-# Start MySQL service
-systemctl enable mariadb
-systemctl start mariadb
+# Start PostgreSQL service
+systemctl enable postgresql
+systemctl start postgresql
 
-# Create RADIUS database and user
-mysql -u root <<EOF
-CREATE DATABASE IF NOT EXISTS radius;
-GRANT ALL PRIVILEGES ON radius.* TO 'radius'@'localhost' IDENTIFIED BY '$RADIUS_DB_PASSWORD';
-FLUSH PRIVILEGES;
-EOF
+# Wait for PostgreSQL to accept connections
+for _ in $(seq 1 30); do
+    pg_isready -h "$DB_HOST" -p "$DB_PORT" >/dev/null 2>&1 && break
+    sleep 1
+done
 
-# Import FreeRADIUS schema if exists
-if [ -f /etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql ]; then
-    mysql -u root radius < /etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql 2>/dev/null || true
+# Create RADIUS role (idempotent)
+if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
+    runuser -u postgres -- psql -c "CREATE ROLE \"$DB_USER\" LOGIN PASSWORD '$DB_PASSWORD';"
+else
+    runuser -u postgres -- psql -c "ALTER ROLE \"$DB_USER\" WITH LOGIN PASSWORD '$DB_PASSWORD';"
 fi
 
-log_info "MySQL/MariaDB configured"
+# Create RADIUS database (idempotent)
+if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1; then
+    runuser -u postgres -- createdb -O "$DB_USER" "$DB_NAME"
+fi
+
+# Import FreeRADIUS schema once
+SCHEMA_FILE="/etc/freeradius/3.0/mods-config/sql/main/postgresql/schema.sql"
+if [ -f "$SCHEMA_FILE" ] && ! PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT to_regclass('public.radcheck')" | grep -q radcheck; then
+    PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f "$SCHEMA_FILE"
+fi
+
+log_info "PostgreSQL configured"
 
 # ==============================================================================
 # STEP 4: Configure FreeRADIUS
@@ -143,27 +160,57 @@ log_info "Step 4: Configuring FreeRADIUS..."
 
 # Configure FreeRADIUS SQL module
 mkdir -p /etc/freeradius/3.0/mods-enabled
-cat > /etc/freeradius/3.0/mods-enabled/sql <<EOF
+mkdir -p /etc/freeradius/3.0/mods-available
+cat > /etc/freeradius/3.0/mods-available/sql <<EOF
 sql {
-    driver = "rlm_sql_mysql"
-    dialect = "mysql"
+    dialect = "postgresql"
+    driver = "rlm_sql_postgresql"
 
-    mysql {
-        server = "localhost"
-        port = 3306
-        login = "radius"
-        password = "$RADIUS_DB_PASSWORD"
-        radius_db = "radius"
+    postgresql {
+        send_application_name = yes
     }
+
+    server = "$DB_HOST"
+    port = $DB_PORT
+    login = "$DB_USER"
+    password = "$DB_PASSWORD"
+    radius_db = "$DB_NAME"
+
+    acct_table1 = "radacct"
+    acct_table2 = "radacct"
+    postauth_table = "radpostauth"
+    authcheck_table = "radcheck"
+    groupcheck_table = "radgroupcheck"
+    authreply_table = "radreply"
+    groupreply_table = "radgroupreply"
+    usergroup_table = "radusergroup"
 
     read_clients = yes
     client_table = "nas"
+    group_attribute = "SQL-Group"
+
+    pool {
+        start = 2
+        min = 1
+        max = 10
+        spare = 3
+        uses = 0
+        retry_delay = 5
+        lifetime = 0
+        idle_timeout = 60
+        max_retries = 5
+    }
+
+    \$INCLUDE \${modconfdir}/\${.:name}/main/\${dialect}/queries.conf
 }
 EOF
 
+chown freerad:freerad /etc/freeradius/3.0/mods-available/sql 2>/dev/null || true
+chmod 640 /etc/freeradius/3.0/mods-available/sql
+
 # Remove existing sql link if present and create new one
 rm -f /etc/freeradius/3.0/mods-enabled/sql
-ln -s /etc/freeradius/3.0/mods-available/sql /etc/freeradius/3.0/mods-enabled/sql
+ln -s ../mods-available/sql /etc/freeradius/3.0/mods-enabled/sql
 
 # Configure FreeRADIUS clients
 if ! grep -q "client localhost" /etc/freeradius/3.0/clients.conf 2>/dev/null; then
@@ -176,9 +223,12 @@ client localhost {
 EOF
 fi
 
-# Update default site to use SQL
-sed -i 's/^\s*-sql/#-sql/' /etc/freeradius/3.0/sites-available/default 2>/dev/null || true
-sed -i 's/^\s*sql/#sql/' /etc/freeradius/3.0/sites-available/default 2>/dev/null || true
+# Update default site to use SQL (uncomment the sql module entries)
+sed -i -E 's/^#([[:space:]]*)-sql/\1-sql/' /etc/freeradius/3.0/sites-available/default 2>/dev/null || true
+
+if ! freeradius -XC >/dev/null 2>&1; then
+    log_warn "FreeRADIUS configuration test failed, check /etc/freeradius/3.0"
+fi
 
 systemctl enable freeradius
 systemctl restart freeradius
@@ -260,17 +310,17 @@ sysctl -p "$SYSCTL_CONF" 2>/dev/null || true
 cat > "$UP_SCRIPT" <<EOF
 #!/bin/bash
 # Enable NAT between WAN and LAN interfaces
-iptables -t nat -A POSTROUTING -o $WAN_INTERFACE -j MASQUERADE
-iptables -A FORWARD -i $WIFI_INTERFACE -o $WAN_INTERFACE -j ACCEPT
-iptables -A FORWARD -i $WAN_INTERFACE -o $WIFI_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables-nft -t nat -A POSTROUTING -o $WAN_INTERFACE -j MASQUERADE
+iptables-nft -A FORWARD -i $WIFI_INTERFACE -o $WAN_INTERFACE -j ACCEPT
+iptables-nft -A FORWARD -i $WAN_INTERFACE -o $WIFI_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
 EOF
 
 chmod +x "$UP_SCRIPT"
 
 # Apply iptables rules immediately
-iptables -t nat -A POSTROUTING -o $WAN_INTERFACE -j MASQUERADE 2>/dev/null || true
-iptables -A FORWARD -i $WIFI_INTERFACE -o $WAN_INTERFACE -j ACCEPT 2>/dev/null || true
-iptables -A FORWARD -i $WAN_INTERFACE -o $WIFI_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+iptables-nft -t nat -A POSTROUTING -o $WAN_INTERFACE -j MASQUERADE 2>/dev/null || true
+iptables-nft -A FORWARD -i $WIFI_INTERFACE -o $WAN_INTERFACE -j ACCEPT 2>/dev/null || true
+iptables-nft -A FORWARD -i $WAN_INTERFACE -o $WIFI_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
 log_info "iptables and routing configured"
 
@@ -292,6 +342,9 @@ server=8.8.4.4
 # Domain to redirect to hotspot
 address=/hotspot.example.com/$HOTSPOT_IP
 address=/uam/$HOTSPOT_IP
+# Captive portal: resolve all other names to the hotspot gateway so clients
+# are always redirected to the login page until authorised
+address=/#/$HOTSPOT_IP
 
 # DHCP Range
 dhcp-range=$WIFI_INTERFACE,$HOTSPOT_NETWORK.10,$HOTSPOT_NETWORK.250,12h
@@ -416,49 +469,68 @@ cat > "$WEB_DIR/prelogin" <<'HTMLEOF'
 </html>
 HTMLEOF
 
-# Create simple PHP login script for uam directory
+# Create captive portal landing page (HTTP) with login form
 mkdir -p "$WEB_DIR/uam"
-cat > "$WEB_DIR/uam/index.php" <<'PHPEOF'
-<?php
-$challenge = $_GET['challenge'] ?? '';
-$userurl = $_GET('userurl') ?? '';
-?>
+cat > "$WEB_DIR/index.html" <<'HTMLEOF'
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wi-Fi Hotspot Login</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-        .container { max-width: 400px; margin: 50px auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #333; text-align: center; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 5px; font-weight: bold; }
-        input[type=text], input[type=password] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-        button:hover { background: #0056b3; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wi-Fi Hotspot - Вход</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.card{background:#fff;padding:24px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.15);width:100%;max-width:360px;text-align:center}
+h2{margin-top:0}
+input{width:100%;padding:10px;margin:8px 0;border:1px solid #ccc;border-radius:6px;box-sizing:border-box}
+button{width:100%;padding:10px;background:#007bff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:16px}
+button:hover{background:#0056b3}
+.msg{margin-top:12px;padding:8px;border-radius:6px;display:none}
+.err{background:#f8d7da;color:#721c24;border:1px solid #f5c6cb}
+.ok{background:#d4edda;color:#155724;border:1px solid #c3e6cb}
+</style>
 </head>
 <body>
-    <div class="container">
-        <h1>Wi-Fi Hotspot Login</h1>
-        <form action="http://<?php echo $_SERVER['SERVER_ADDR']; ?>:3990/login" method="post">
-            <input type="hidden" name="challenge" value="<?php echo htmlspecialchars($challenge); ?>">
-            <input type="hidden" name="userurl" value="<?php echo htmlspecialchars($userurl); ?>">
-            <div class="form-group">
-                <label for="username">Username:</label>
-                <input type="text" id="username" name="username" required>
-            </div>
-            <div class="form-group">
-                <label for="password">Password:</label>
-                <input type="password" id="password" name="password" required>
-            </div>
-            <button type="submit">Login</button>
-        </form>
-    </div>
+<div class="card">
+<h2>Wi-Fi Hotspot</h2>
+<p>Войдите, чтобы получить доступ в интернет</p>
+<form id="f">
+<input type="text" name="username" placeholder="Логин" required autofocus>
+<input type="password" name="password" placeholder="Пароль" required>
+<button type="submit">Войти</button>
+</form>
+<div class="msg err" id="e">Неверный логин или пароль</div>
+<div class="msg ok" id="s">Успешно! Вы можете пользоваться интернетом.</div>
+</div>
+<script>
+document.getElementById("f").onsubmit=function(t){t.preventDefault();var n=new FormData(this);fetch("/uam/auth.php",{method:"POST",body:n,credentials:"same-origin"}).then(function(t){return t.ok?t.text():Promise.reject(t)}).then(function(){document.getElementById("s").style.display="block";setTimeout(function(){location.href="https://www.google.com";},1500)}).catch(function(){document.getElementById("e").style.display="block"});};
+</script>
 </body>
 </html>
+HTMLEOF
+
+# UAM login handler: radtest against FreeRADIUS (PostgreSQL)
+cat > "$WEB_DIR/uam/auth.php" <<'PHPEOF'
+<?php
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') { http_response_code(405); exit('Метод не разрешен'); }
+$username = $_POST['username'] ?? '';
+$password = $_POST['password'] ?? '';
+if ($username === '' || $password === '') { exit('Логин и пароль обязательны'); }
+$username = escapeshellarg($username);
+$password = escapeshellarg($password);
+$cmd = "/usr/bin/radtest $username $password 127.0.0.1 1 radtesting123";
+exec($cmd . " 2>&1", $output, $returncode);
+$output_str = implode("
+", $output);
+if ($returncode === 0 && strpos($output_str, 'Access-Accept') !== false) {
+    header('Location: /uam/?success=1');
+} elseif (strpos($output_str, 'Access-Reject') !== false) {
+    header('Location: /uam/?error=1');
+} else {
+    error_log('RADIUS ошибка: ' . $output_str);
+    header('Location: /uam/?error=2');
+}
+exit();
 PHPEOF
 
 log_info "Captive portal web files created"
@@ -469,34 +541,46 @@ log_info "Captive portal web files created"
 log_info "Step 9: Configuring Nginx..."
 
 # Create Nginx configuration
+PHP_FPM_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | head -1 || echo /run/php/php-fpm.sock)
 cat > /etc/nginx/sites-available/hotspot <<EOF
 server {
-    listen $HOTSPOT_IP:80;
-    server_name hotspot.example.com;
+    listen 80 default_server;
+    server_name _;
+    root $WEB_DIR;
+    index index.html index.php;
 
-    # Redirect all HTTP to HTTPS or captive portal
-    return 302 http://$HOTSPOT_IP:3990/uam/;
+    # Captive portal landing page (HTTP). All client DNS resolves here.
+    location / {
+        try_files \$uri \$uri/ /index.html =404;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$PHP_FPM_SOCK;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
 }
 
 server {
-    listen $HOTSPOT_IP:443 ssl;
-    server_name hotspot.example.com;
-
+    listen 443 ssl default_server;
+    server_name _;
     root $WEB_DIR;
-    index index.php index.html;
+    index index.html;
 
     ssl_certificate /etc/ssl/certs/ssl-cert-snakeoil.pem;
     ssl_certificate_key /etc/ssl/private/ssl-cert-snakeoil.key;
 
     location / {
-        try_files \$uri \$uri/ =404;
+        try_files \$uri \$uri/ /index.html =404;
     }
 
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/run/php/php*-fpm.sock;
+        fastcgi_pass unix:$PHP_FPM_SOCK;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     }
 }
+EOF
 EOF
 
 # Enable site
@@ -517,11 +601,15 @@ log_info "Nginx configured"
 log_info "Step 10: Creating test users in FreeRADIUS..."
 
 # Add test users to RADIUS database
-mysql -u root radius <<EOF
+PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" <<EOF
 DELETE FROM radcheck WHERE username IN ('demo', 'usertest');
-INSERT INTO radcheck (username, attribute, op, value) VALUES 
+INSERT INTO radcheck (username, attribute, op, value) VALUES
     ('demo', 'Cleartext-Password', ':=', 'demo123'),
     ('usertest', 'Cleartext-Password', ':=', 'passwd');
+DELETE FROM nas WHERE nasname IN ('127.0.0.1', 'localhost');
+INSERT INTO nas (nasname, shortname, type, secret, description) VALUES
+    ('127.0.0.1', 'localhost', 'other', '$RADIUS_SECRET', 'Local RADIUS client'),
+    ('localhost', 'localhost', 'other', '$RADIUS_SECRET', 'RADIUS Client');
 EOF
 
 log_info "Test users created: demo/demo123 and usertest/passwd"

@@ -38,20 +38,19 @@ services:
       retries: 3
       start_period: 40s
 
-  # Development database container (optional, for easier MySQL management)
-  mysql-dev:
-    image: mysql:5.7
-    container_name: mysql-dev
+  # Development database container (optional, for easier PostgreSQL management)
+  postgres-dev:
+    image: postgres:17
+    container_name: postgres-dev
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: raspbian
-      MYSQL_DATABASE: radius
-      MYSQL_USER: appdemoradius
-      MYSQL_PASSWORD: raspbian
+      POSTGRES_DB: radius
+      POSTGRES_USER: freerad
+      POSTGRES_PASSWORD: radtesting123
     ports:
-      - "3306:3306"
+      - "5432:5432"
     volumes:
-      - ./docker/data/mysql-dev:/var/lib/mysql
+      - ./docker/data/postgres-dev:/var/lib/postgresql/data
     profiles:
       - dev
     networks:

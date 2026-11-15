@@ -14,8 +14,8 @@ LABEL description="Docker container for WiFi Hotspot with Captive Portal (CoovaC
 # Install system dependencies
 # Note: libpcrecpp0v5 not available in 22.04 (included in libpcre3-dev)
 #       PHP 8.1 is default on Ubuntu 22.04
-#       freeradius/freeradius-mysql from Ubuntu repos: sets up user, group, init.d, log dirs, config structure
-#       We will then overlay with FreeRADIUS 3.2.x built from source to remove MYSQL_OPT_RECONNECT
+#       freeradius/freeradius-postgresql from Ubuntu repos: sets up user, group, init.d, log dirs, config structure
+#       We will then overlay with FreeRADIUS 3.2.x built from source with PostgreSQL support
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     wget \
@@ -55,18 +55,18 @@ RUN apt-get update && \
     libgcrypt20-dev \
     nginx \
     php8.1-fpm \
-    php8.1-mysql \
+    php8.1-pgsql \
     php8.1-gd \
     php8.1-curl \
     php8.1-mbstring \
     php8.1-xml \
     php8.1-zip \
-    mysql-server \
-    mysql-client \
+    postgresql \
+    postgresql-client \
     freeradius \
-    freeradius-mysql \
+    freeradius-postgresql \
     libtalloc-dev \
-    default-libmysqlclient-dev \
+    libpq-dev \
     libgdbm-dev \
     libcap-dev \
     dnsmasq \
@@ -75,9 +75,7 @@ RUN apt-get update && \
     unzip && \
     rm -rf /var/lib/apt/lists/*
 
-# Build FreeRADIUS 3.2.x from source
-# This overlays the Ubuntu 3.0.x binaries with 3.2.x which has proper MySQL 8.0
-# support and no MYSQL_OPT_RECONNECT deprecation.
+# Build FreeRADIUS 3.2.x from source with PostgreSQL support
 # --with-raddbdir=/etc/freeradius/3.0 matches the Ubuntu package config path
 RUN git clone --depth 1 --branch v3.2.x \
         https://github.com/FreeRADIUS/freeradius-server.git /tmp/freeradius-src && \
@@ -88,8 +86,8 @@ RUN git clone --depth 1 --branch v3.2.x \
         --localstatedir=/var \
         --with-raddbdir=/etc/freeradius/3.0 \
         --with-logdir=/var/log/freeradius \
-        --with-mysql \
-        --without-rlm_sql_postgresql \
+        --with-postgresql \
+        --without-rlm_sql_mysql \
         --without-rlm_sql_iodbc \
         --without-rlm_ldap \
         --without-rlm_eap_pwd && \
@@ -136,12 +134,12 @@ RUN echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 # Set permissions
 RUN chown -R www-data:www-data /var/www/hotspot.example.com
 
-# Create MySQL initialization script
-COPY docker/init-mysql.sh /docker-entrypoint-initdb.d/
-RUN chmod +x /docker-entrypoint-initdb.d/init-mysql.sh
+# Create PostgreSQL initialization script
+COPY docker/init-postgres.sh /docker-entrypoint-initdb.d/
+RUN chmod +x /docker-entrypoint-initdb.d/init-postgres.sh
 
 # Expose necessary ports
-EXPOSE 80 443 3990 4990 1812 1813 3306 67/udp 53/udp
+EXPOSE 80 443 3990 4990 1812 1813 5432 67/udp 53/udp
 
 # Set entrypoint
 ENTRYPOINT ["/usr/local/bin/init-hotspot"]

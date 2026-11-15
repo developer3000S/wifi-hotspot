@@ -31,11 +31,15 @@ export HS_DHCP_START="10.10.10.100"      # DHCP range start
 export HS_DHCP_END="10.10.10.200"        # DHCP range end
 export HS_DHCP_LEASE="86400"             # DHCP lease time (seconds)
 
-# Database Configuration
-export MYSQL_ROOT_PASSWORD="raspbian"     # MySQL root password
-export RADIUS_DB_USER="appdemoradius"    # RADIUS database user
-export RADIUS_DB_PASSWORD="raspbian"    # RADIUS database password
-export RADIUS_DB_NAME="radius"           # RADIUS database name
+# Database Configuration (PostgreSQL)
+export DB_HOST="127.0.0.1"               # PostgreSQL host
+export DB_PORT="5432"                    # PostgreSQL port
+export DB_NAME="radius"                  # RADIUS database name
+export DB_USER="freerad"                 # RADIUS database user
+export DB_PASSWORD="radtesting123"       # RADIUS database password
+export RADIUS_DB_USER="freerad"          # RADIUS database user (legacy alias)
+export RADIUS_DB_PASSWORD="radtesting123" # RADIUS database password (legacy alias)
+export RADIUS_DB_NAME="radius"           # RADIUS database name (legacy alias)
 
 # HotSpot Settings
 export HOTSPOT_SSID="MME Captive Portal" # WiFi SSID
