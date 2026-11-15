@@ -241,8 +241,8 @@ HS_RADSECRET=${HS_RADSECRET:-radtesting123}
 HS_UAMSECRET=${HS_UAMSECRET:-uamtesting123}
 
 # UAM Format
-HS_UAMFORMAT=https://\${HS_UAMLISTEN}/hotspotlogin.php
-HS_UAMHOMEPAGE=http://\${HS_UAMLISTEN}:\${HS_UAMPORT}/prelogin
+HS_UAMFORMAT=http://${HS_UAMLISTEN}:80/
+HS_UAMHOMEPAGE=http://${HS_UAMLISTEN}:80/
 
 # Firewall ports
 HS_TCP_PORTS="${HS_TCP_PORTS:-80 443}"

@@ -25,8 +25,8 @@ HS_RADSECRET=radtesting123    # Set to be your RADIUS shared secret
 HS_UAMSECRET=uamtesting123    # Set to be your UAM secret
 
 # UAM Format
-HS_UAMFORMAT=https://${HS_UAMLISTEN}/hotspotlogin.php
-HS_UAMHOMEPAGE=http://${HS_UAMLISTEN}:${HS_UAMPORT}/prelogin
+HS_UAMFORMAT=http://${HS_UAMLISTEN}:80/
+HS_UAMHOMEPAGE=http://${HS_UAMLISTEN}:80/
 
 # Firewall issues
 # Uncomment the following to add ports to the allowed local ports list
